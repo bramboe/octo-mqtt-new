@@ -18,6 +18,7 @@ import websockets
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 import paho.mqtt.client as mqtt
+import threading
 
 # Configure logging
 logging.basicConfig(
@@ -298,13 +299,14 @@ class BLEScanner:
         """Start the Flask application"""
         # Load previously discovered devices
         self.load_devices()
-        
-        # Start scanning in background
-        asyncio.create_task(self.scan_loop())
-        
+        # Start scanning in a background thread with its own event loop
+        def scan_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.scan_loop())
+        threading.Thread(target=scan_thread, daemon=True).start()
         # Run Flask app
         self.app.run(host='0.0.0.0', port=8099, debug=False)
-        
         # Cleanup MQTT
         if self.mqtt_client:
             self.mqtt_client.loop_stop()

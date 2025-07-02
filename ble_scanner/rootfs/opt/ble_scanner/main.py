@@ -121,18 +121,25 @@ class BLEScanner:
         
         @self.app.route('/api/scan/start', methods=['POST'])
         def start_scan():
-            if self.running:
-                logger.info("[SCAN] Scan already running.")
-                return jsonify({'message': 'Scan already running'})
-            logger.info("[SCAN] Starting BLE scan loop (user request)")
-            self.running = True
-            def scan_thread():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self.scan_loop())
-            self.scan_thread = threading.Thread(target=scan_thread, daemon=True)
-            self.scan_thread.start()
-            return jsonify({'message': 'Scan started'})
+            try:
+                if self.running:
+                    logger.info("[SCAN] Scan already running.")
+                    return jsonify({'message': 'Scan already running'})
+                logger.info("[SCAN] Starting BLE scan loop (user request)")
+                self.running = True
+                def scan_thread():
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(self.scan_loop())
+                    except Exception as e:
+                        logger.error(f"[SCAN] Exception in scan thread: {e}")
+                self.scan_thread = threading.Thread(target=scan_thread, daemon=True)
+                self.scan_thread.start()
+                return jsonify({'message': 'Scan started'})
+            except Exception as e:
+                logger.error(f"[SCAN] Exception in /api/scan/start: {e}")
+                return jsonify({'message': f'Error starting scan: {e}'}), 500
         
         @self.app.route('/api/scan/stop', methods=['POST'])
         def stop_scan():

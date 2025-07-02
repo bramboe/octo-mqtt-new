@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.9"
+ADDON_VERSION = "1.0.10"
 
 class BLEScanner:
     def __init__(self):
@@ -242,7 +242,7 @@ class BLEScanner:
             logger.info("[MQTT] Auto-detecting MQTT credentials...")
             self.mqtt_user, self.mqtt_password = self.auto_detect_mqtt_credentials()
             
-        self.mqtt_client = mqtt.Client(client_id=f"ble_scanner_{int(time.time())}")
+        self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=f"ble_scanner_{int(time.time())}")
         if self.mqtt_user and self.mqtt_user != '<auto_detect>':
             self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
         self.mqtt_client.on_connect = self.on_mqtt_connect
@@ -320,14 +320,58 @@ class BLEScanner:
                 username = config.get('username')
                 password = config.get('password')
                 if username and password:
-                    logger.info("[MQTT] Auto-detected MQTT credentials")
+                    logger.info("[MQTT] Auto-detected MQTT credentials from addon config")
                     return username, password
+                    
+            # Try to get credentials from Home Assistant configuration
+            response = requests.get(f"{supervisor_url}/core/api/config", headers=headers, timeout=10)
+            if response.status_code == 200:
+                config = response.json()['data']
+                mqtt_config = config.get('mqtt', {})
+                username = mqtt_config.get('username')
+                password = mqtt_config.get('password')
+                if username and password:
+                    logger.info("[MQTT] Auto-detected MQTT credentials from HA config")
+                    return username, password
+                    
+            # Try to get credentials from secrets
+            response = requests.get(f"{supervisor_url}/core/api/config", headers=headers, timeout=10)
+            if response.status_code == 200:
+                config = response.json()['data']
+                secrets = config.get('secrets', {})
+                mqtt_username = secrets.get('mqtt_username')
+                mqtt_password = secrets.get('mqtt_password')
+                if mqtt_username and mqtt_password:
+                    logger.info("[MQTT] Auto-detected MQTT credentials from secrets")
+                    return mqtt_username, mqtt_password
                     
         except Exception as e:
             logger.warning(f"[MQTT] Credential auto-detection failed: {e}")
             
-        # Fallback: try common default credentials
-        logger.info("[MQTT] Using fallback MQTT credentials")
+        # Try common default credentials
+        logger.info("[MQTT] Trying common default MQTT credentials")
+        common_credentials = [
+            ("homeassistant", "homeassistant"),
+            ("mqtt", "mqtt"),
+            ("admin", "admin"),
+            ("user", "password"),
+            ("", "")  # No credentials
+        ]
+        
+        for username, password in common_credentials:
+            try:
+                # Test connection with these credentials
+                test_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=f"test_{int(time.time())}")
+                if username:
+                    test_client.username_pw_set(username, password)
+                test_client.connect("core-mosquitto", 1883, 5)
+                test_client.disconnect()
+                logger.info(f"[MQTT] Found working credentials: {username}")
+                return username, password
+            except Exception:
+                continue
+                
+        logger.warning("[MQTT] No working credentials found, MQTT will be disabled")
         return None, None
     
     def on_mqtt_connect(self, client, userdata, flags, rc):

@@ -1,6 +1,6 @@
 ---
 name: "BLE Scanner"
-version: "1.0.3"
+version: "1.0.4"
 slug: "ble_scanner"
 description: "Standalone BLE scanner with web UI for discovering and managing BLE devices"
 arch:
@@ -27,7 +27,7 @@ options:
   scan_interval: 30
   log_level: info
   mqtt_host: "<auto_detect>"
-  mqtt_port: 1883
+          mqtt_port: "<auto_detect>"
   mqtt_user: "<auto_detect>"
   mqtt_password: "<auto_detect>"
   mqtt_topic: "ble_scanner/devices"

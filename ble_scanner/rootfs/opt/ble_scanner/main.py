@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.3"
+ADDON_VERSION = "1.0.4"
 
 class BLEScanner:
     def __init__(self):
@@ -70,14 +70,19 @@ class BLEScanner:
                 log_level = config.get('log_level', 'info')
                 # MQTT
                 self.mqtt_host = config.get('mqtt_host', None)
-                self.mqtt_port = config.get('mqtt_port', 1883)
+                mqtt_port_config = config.get('mqtt_port', 1883)
+                # Handle auto_detect for port
+                if mqtt_port_config == '<auto_detect>' or mqtt_port_config == '<auto_detect>':
+                    self.mqtt_port = 1883  # Default MQTT port
+                else:
+                    self.mqtt_port = int(mqtt_port_config)
                 self.mqtt_user = config.get('mqtt_user', None)
                 self.mqtt_password = config.get('mqtt_password', None)
                 self.mqtt_topic = config.get('mqtt_topic', 'ble_scanner/devices')
                 # Set log level
                 if log_level == 'debug':
                     logging.getLogger().setLevel(logging.DEBUG)
-                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}")
+                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}")
             else:
                 logger.warning("[CONFIG] No configuration file found, using defaults")
         except Exception as e:

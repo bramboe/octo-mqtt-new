@@ -1,4 +1,5 @@
 {
   "name": "Octo MQTT New Add-ons",
-  "url": "https://github.com/bramboe/octo-mqtt-new"
+  "url": "https://github.com/bramboe/octo-mqtt-new",
+  "maintainer": "Bram Boersma"
 }

@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.10"
+ADDON_VERSION = "1.0.11"
 
 class BLEScanner:
     def __init__(self):
@@ -242,7 +242,7 @@ class BLEScanner:
             logger.info("[MQTT] Auto-detecting MQTT credentials...")
             self.mqtt_user, self.mqtt_password = self.auto_detect_mqtt_credentials()
             
-        self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=f"ble_scanner_{int(time.time())}")
+        self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"ble_scanner_{int(time.time())}")
         if self.mqtt_user and self.mqtt_user != '<auto_detect>':
             self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
         self.mqtt_client.on_connect = self.on_mqtt_connect
@@ -355,22 +355,66 @@ class BLEScanner:
             ("mqtt", "mqtt"),
             ("admin", "admin"),
             ("user", "password"),
-            ("", "")  # No credentials
+            ("", ""),  # No credentials
+            ("homeassistant", ""),  # Username only
+            ("", "homeassistant"),  # Password only
         ]
         
         for username, password in common_credentials:
             try:
                 # Test connection with these credentials
-                test_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=f"test_{int(time.time())}")
+                test_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"test_{int(time.time())}")
                 if username:
                     test_client.username_pw_set(username, password)
+                
+                # Set up connection callbacks for testing
+                connected = False
+                def on_connect_test(client, userdata, flags, reason_code, properties=None):
+                    nonlocal connected
+                    if reason_code == 0:
+                        connected = True
+                    else:
+                        connected = False
+                
+                test_client.on_connect = on_connect_test
                 test_client.connect("core-mosquitto", 1883, 5)
+                test_client.loop_start()
+                
+                # Wait a bit for connection
+                time.sleep(2)
+                test_client.loop_stop()
                 test_client.disconnect()
-                logger.info(f"[MQTT] Found working credentials: {username}")
-                return username, password
+                
+                if connected:
+                    logger.info(f"[MQTT] Found working credentials: {username}")
+                    return username, password
             except Exception:
                 continue
                 
+        # Try connecting without credentials as last resort
+        try:
+            test_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"test_noauth_{int(time.time())}")
+            connected = False
+            def on_connect_test(client, userdata, flags, reason_code, properties=None):
+                nonlocal connected
+                if reason_code == 0:
+                    connected = True
+                else:
+                    connected = False
+            
+            test_client.on_connect = on_connect_test
+            test_client.connect("core-mosquitto", 1883, 5)
+            test_client.loop_start()
+            time.sleep(2)
+            test_client.loop_stop()
+            test_client.disconnect()
+            
+            if connected:
+                logger.info("[MQTT] Connection successful without credentials")
+                return None, None
+        except Exception as e:
+            logger.debug(f"[MQTT] No-auth test failed: {e}")
+            
         logger.warning("[MQTT] No working credentials found, MQTT will be disabled")
         return None, None
     

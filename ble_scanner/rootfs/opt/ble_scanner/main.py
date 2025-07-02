@@ -20,7 +20,7 @@ from flask_cors import CORS
 import paho.mqtt.client as mqtt
 import threading
 import requests
-from aioesphomeapi import APIClient, BluetoothLEAdvertisement, APIConnectionError
+from aioesphomeapi import APIClient, APIConnectionError
 
 # Configure logging
 logging.basicConfig(
@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.16"
+ADDON_VERSION = "1.0.17"
 
 class BLEScanner:
     def __init__(self):
@@ -519,15 +519,16 @@ class BLEScanner:
                 self.proxy_connections[proxy_key] = True
                 logger.info(f"[BLEPROXY] Connected to ESPHome BLE proxy at {host}:{port}")
 
-                async def handle_ble_advertisement(advertisement: BluetoothLEAdvertisement):
-                    adv = {
-                        'address': advertisement.address,
-                        'name': advertisement.name or 'Unknown Device',
-                        'rssi': advertisement.rssi,
-                        'manufacturer_data': advertisement.manufacturer_data,
-                        'service_uuids': advertisement.service_uuids,
+                async def handle_ble_advertisement(adv):
+                    # adv is a dict with keys like 'address', 'name', 'rssi', etc.
+                    adv_dict = {
+                        'address': adv.get('address'),
+                        'name': adv.get('name', 'Unknown Device'),
+                        'rssi': adv.get('rssi'),
+                        'manufacturer_data': adv.get('manufacturer_data', {}),
+                        'service_uuids': adv.get('service_uuids', []),
                     }
-                    await self.process_ble_advertisement({'bluetooth_le_advertisement': adv}, proxy_key)
+                    await self.process_ble_advertisement({'bluetooth_le_advertisement': adv_dict}, proxy_key)
 
                 await client.subscribe_bluetooth_le_advertisements(handle_ble_advertisement)
                 logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {host}:{port}")

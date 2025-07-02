@@ -121,6 +121,7 @@ class BLEScanner:
         
         @self.app.route('/api/scan/start', methods=['POST'])
         def start_scan():
+            logger.info("[SCAN] /api/scan/start called")
             try:
                 if self.running:
                     logger.info("[SCAN] Scan already running.")
@@ -158,6 +159,11 @@ class BLEScanner:
                 'proxy_count': len(self.esp32_proxies),
                 'scan_interval': self.scan_interval
             })
+        
+        @self.app.errorhandler(Exception)
+        def handle_exception(e):
+            logger.error(f"[FLASK] Unhandled exception: {e}")
+            return jsonify({'message': f'Internal server error: {e}'}), 500
     
     def save_devices(self):
         """Save discovered devices to file"""

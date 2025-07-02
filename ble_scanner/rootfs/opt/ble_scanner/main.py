@@ -20,6 +20,7 @@ from flask_cors import CORS
 import paho.mqtt.client as mqtt
 import threading
 import requests
+from aioesphomeapi import APIClient, BluetoothLEAdvertisement, APIConnectionError
 
 # Configure logging
 logging.basicConfig(
@@ -506,71 +507,41 @@ class BLEScanner:
         self.mqtt_connected = False
     
     async def connect_esp32_proxy(self, proxy):
-        """Connect to ESP32 BLE proxy with detailed logging"""
-        # Try WebSocket connection first (ESPHome API)
-        ws_uri = f"ws://{proxy['host']}:{proxy['port']}"
-        logger.info(f"[BLEPROXY] Attempting WebSocket connection to {ws_uri}")
-        start_time = time.time()
-        
+        """Connect to ESP32 BLE proxy using ESPHome API (aioesphomeapi)"""
+        host = proxy['host']
+        port = proxy.get('port', 6053)
+        password = proxy.get('password', '')
+        proxy_key = f"{host}:{port}"
+        logger.info(f"[BLEPROXY] Connecting to ESPHome API at {host}:{port}")
+        client = APIClient(host, port, password=password)
         try:
-            # Test basic connectivity first
-            logger.info(f"[BLEPROXY] Testing connectivity to {proxy['host']}:{proxy['port']}")
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.get(f"http://{proxy['host']}:{proxy['port']}/", timeout=5) as response:
-                        logger.info(f"[BLEPROXY] HTTP connectivity test: {response.status}")
-                except Exception as e:
-                    logger.error(f"[BLEPROXY] HTTP connectivity test failed: {e}")
-                    # Try HTTP API as fallback
-                    await self.try_http_api(proxy)
-                    return
-            
-            async with websockets.connect(ws_uri, ping_interval=30, ping_timeout=10) as websocket:
-                proxy_key = f"{proxy['host']}:{proxy['port']}"
-                self.proxy_connections[proxy_key] = True
-                logger.info(f"[BLEPROXY] Connected to {proxy['host']}:{proxy['port']} after {time.time() - start_time:.2f}s")
-                
-                # Send ESPHome API authentication (if needed)
-                auth_msg = {
-                    "type": "auth",
-                    "api_password": ""  # Empty for no password
+            await client.connect(login=True)
+            self.proxy_connections[proxy_key] = True
+            logger.info(f"[BLEPROXY] Connected to ESPHome BLE proxy at {host}:{port}")
+
+            async def handle_ble_advertisement(advertisement: BluetoothLEAdvertisement):
+                adv = {
+                    'address': advertisement.address,
+                    'name': advertisement.name or 'Unknown Device',
+                    'rssi': advertisement.rssi,
+                    'manufacturer_data': advertisement.manufacturer_data,
+                    'service_uuids': advertisement.service_uuids,
                 }
-                await websocket.send(json.dumps(auth_msg))
-                logger.info(f"[BLEPROXY] Sent authentication to {proxy['host']}:{proxy['port']}")
-                
-                # Subscribe to BLE advertisements
-                subscribe_msg = {
-                    "id": 1,
-                    "type": "subscribe_bluetooth_le_advertisements"
-                }
-                await websocket.send(json.dumps(subscribe_msg))
-                logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {proxy['host']}:{proxy['port']}")
-                
-                # Listen for BLE advertisements
-                async for message in websocket:
-                    try:
-                        data = json.loads(message)
-                        logger.debug(f"[BLEPROXY] Received message from {proxy['host']}:{proxy['port']}: {data}")
-                        await self.process_ble_advertisement(data, f"{proxy['host']}:{proxy['port']}")
-                    except json.JSONDecodeError:
-                        logger.warning(f"[BLEPROXY] Invalid JSON from proxy {proxy['host']}:{proxy['port']}: {message}")
-                    except Exception as e:
-                        logger.error(f"[BLEPROXY] Error processing message from {proxy['host']}:{proxy['port']}: {e}")
-                        
-        except websockets.exceptions.ConnectionClosed:
-            proxy_key = f"{proxy['host']}:{proxy['port']}"
+                await self.process_ble_advertisement({'bluetooth_le_advertisement': adv}, proxy_key)
+
+            await client.subscribe_bluetooth_le_advertisements(handle_ble_advertisement)
+            logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {host}:{port}")
+            # Keep the connection open for the scan interval
+            await asyncio.sleep(self.scan_interval)
+            await client.disconnect()
             self.proxy_connections[proxy_key] = False
-            logger.warning(f"[BLEPROXY] WebSocket connection closed to {proxy['host']}:{proxy['port']}")
-        except websockets.exceptions.InvalidURI:
-            proxy_key = f"{proxy['host']}:{proxy['port']}"
+            logger.info(f"[BLEPROXY] Disconnected from ESPHome BLE proxy at {host}:{port}")
+        except APIConnectionError as e:
             self.proxy_connections[proxy_key] = False
-            logger.error(f"[BLEPROXY] Invalid WebSocket URI: {ws_uri}")
+            logger.error(f"[BLEPROXY] ESPHome API connection error: {e}")
         except Exception as e:
-            proxy_key = f"{proxy['host']}:{proxy['port']}"
             self.proxy_connections[proxy_key] = False
-            logger.error(f"[BLEPROXY] Error connecting to {proxy['host']}:{proxy['port']}: {e}")
-            # Try HTTP API as fallback
-            await self.try_http_api(proxy)
+            logger.error(f"[BLEPROXY] Error connecting to ESPHome BLE proxy at {host}:{port}: {e}")
 
     async def test_websocket_connection(self, proxy):
         """Test WebSocket connection to ESP32 proxy"""

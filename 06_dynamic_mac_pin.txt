@@ -1,0 +1,2365 @@
+# Substitutions for easy configuration
+substitutions:
+  name: octo-bed
+  friendly_name: Octo Bed
+  device_name: RC2
+
+esphome:
+  name: octo-bed
+  friendly_name: Octo Bed
+  min_version: 2024.11.0
+  name_add_mac_suffix: false
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger: 
+  level: DEBUG
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret bed_api_key
+
+# Allow Over-The-Air updates
+ota:
+  - platform: esphome
+    password: !secret "ota_password"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+captive_portal:
+
+# Global variables
+globals:
+  # BLE-related globals
+  - id: device_name
+    type: std::string
+    initial_value: '"RC2"'
+  - id: target_mac
+    type: std::string
+    initial_value: '""'
+  - id: stored_pin
+    type: std::string
+    initial_value: '"0000"'
+  - id: pause_ble_scanning
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  # Calibration timing variables
+  - id: head_up_duration
+    type: int
+    restore_value: true
+    initial_value: "30000" # Default 30 seconds (in ms)
+  - id: feet_up_duration
+    type: int
+    restore_value: true
+    initial_value: "30000" # Default 30 seconds (in ms)
+  - id: calibration_mode
+    type: int
+    restore_value: false
+    initial_value: "0" # 0=none, 1=head calibrating, 2=feet calibrating
+  - id: calibration_start_time
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    
+  # Position tracking variables
+  - id: head_current_position
+    type: float
+    restore_value: true
+    initial_value: "0" # 0-100%
+  - id: feet_current_position
+    type: float
+    restore_value: true
+    initial_value: "0" # 0-100%
+  - id: target_feet_position
+    type: float
+    restore_value: false
+    initial_value: "0.0"
+  - id: head_start_position
+    type: float
+    restore_value: false
+    initial_value: "0"
+  - id: target_head_position
+    type: float
+    restore_value: false
+    initial_value: "0.0"
+    
+  # Movement tracking variables
+  - id: movement_end_time
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: movement_start_time
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: head_movement_start_time
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: movement_start_position
+    type: float
+    restore_value: false
+    initial_value: "0.0"
+  - id: movement_target_position
+    type: float
+    restore_value: false
+    initial_value: "0.0"
+  
+  # Movement state variables
+  - id: continuous_movement_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: movement_in_progress
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: movement_lock
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: current_movement_type
+    type: int
+    restore_value: false
+    initial_value: "0"  # 0: no movement, 1: head up, 2: head down, 3: feet up, 4: feet down, 5: both up, 6: both down
+
+  # Debugging variables
+  - id: debug_mode
+    type: bool
+    restore_value: false
+    initial_value: "true"  # Set to true for verbose logging
+
+# Bluetooth Low Energy Configuration
+
+esp32_ble_tracker:
+  id: ble_tracker
+  scan_parameters:
+    duration: 30s
+    interval: 100ms
+    window: 50ms
+    active: true
+  on_ble_advertise:
+    - lambda: |-
+        // Skip processing if scanning is paused
+        if (id(pause_ble_scanning)) {
+          return;
+        }
+
+        // Convert MAC address to uppercase string for consistent formatting
+        char mac_str[13];
+        uint64_t mac = x.address_uint64();
+        snprintf(mac_str, sizeof(mac_str), "%012llX", mac);
+
+        // Comprehensive device information logging
+        ESP_LOGD("BLE_SCAN", "Discovered BLE Device Details:");
+        ESP_LOGD("BLE_SCAN", "  Name       : %s",
+                 x.get_name().empty() ? "N/A" : x.get_name().c_str());
+        ESP_LOGD("BLE_SCAN", "  MAC Address: %s", mac_str);
+        ESP_LOGD("BLE_SCAN", "  RSSI       : %d dBm", x.get_rssi());
+
+        // Check if the device matches our target criteria
+        std::string device_name_str = id(device_name);
+        std::string target_mac_str = id(target_mac);
+
+        bool name_match = (strcasecmp(x.get_name().c_str(), device_name_str.c_str()) == 0);
+        bool mac_match = (!target_mac_str.empty() &&
+                          (std::string(mac_str) == target_mac_str));
+
+        // Logging connection decision logic
+        if (name_match || mac_match) {
+            ESP_LOGI("BLE_SCAN", "Potential Target Device Found!");
+            ESP_LOGI("BLE_SCAN", "  Name Match : %s", name_match ? "Yes" : "No");
+            ESP_LOGI("BLE_SCAN", "  MAC Match  : %s", mac_match ? "Yes" : "No");
+        } else {
+            ESP_LOGD("BLE_SCAN", "Device does not match target criteria");
+        }
+
+        // Connection attempt logic (existing logic with enhanced logging)
+        auto *client = id(star2octo);
+
+        // Skip processing if already connected
+        if (client->connected()) {
+            ESP_LOGD("BLE_CONNECTION", "Already connected. Skipping new connection attempt.");
+            return;
+        }
+
+        // Decide whether to connect
+        bool should_connect = false;
+        if (target_mac_str.empty()) {
+            // If no MAC specified, connect based on name only
+            should_connect = name_match;
+        } else {
+            // If MAC specified, require BOTH name AND MAC to match
+            should_connect = name_match && mac_match;
+        }
+
+        if (should_connect) {
+            ESP_LOGI("BLE_CONNECTION", "Attempting to connect to device:");
+            ESP_LOGI("BLE_CONNECTION", "  Name: %s", x.get_name().c_str());
+            ESP_LOGI("BLE_CONNECTION", "  MAC : %s", mac_str);
+
+            // Set the address and attempt connection
+            client->set_address(x.address_uint64());
+
+            // Attempt connection without assigning the result
+            client->connect();
+
+            // Additional logging based on connection state
+            if (client->connected()) {
+                ESP_LOGI("BLE_CONNECTION", "Connection established successfully");
+            } else {
+                ESP_LOGE("BLE_CONNECTION", "Failed to connect to the device");
+            }
+        } else {
+            ESP_LOGD("BLE_SCAN", "Device not selected for connection");
+        }
+
+ble_client:
+  id: star2octo
+  mac_address: "00:00:00:00:00:00"
+  auto_connect: false
+  
+  on_connect:
+    then:
+      - lambda: |-
+          ESP_LOGI("BLE_CONNECTION", "Successfully connected to device");
+          // Log connection details
+          ESP_LOGD("BLE_CONNECTION", "Connected Device: %s (MAC: %s)",
+                   id(device_name).c_str(),
+                   id(target_mac).c_str());
+          
+          // Pause BLE scanning to save resources
+          id(pause_ble_scanning) = true;
+          ESP_LOGI("BLE_SCAN", "BLE scanning paused - connection established");
+      - binary_sensor.template.publish:
+          id: remote_connection_status
+          state: True
+      # Add a delay to ensure service discovery completes before keep-alive starts
+      - delay: 1s
+      - script.execute: keep_connection_alive
+
+  on_disconnect:
+    then:
+      - lambda: |-
+          ESP_LOGE("BLE_CONNECTION", "Disconnected from device unexpectedly");
+          ESP_LOGW("BLE_CONNECTION", "Last known device: %s (MAC: %s)",
+                   id(device_name).c_str(),
+                   id(target_mac).c_str());
+          
+          // Resume BLE scanning to reconnect
+          id(pause_ble_scanning) = false;
+          ESP_LOGI("BLE_SCAN", "BLE scanning resumed - connection lost");
+          
+          // Restart scanning explicitly
+          id(ble_tracker).start_scan();
+      - binary_sensor.template.publish:
+          id: remote_connection_status
+          state: False
+
+# Configuration Inputs
+text:
+  - platform: template
+    name: "${friendly_name} MAC Address"
+    id: target_mac_input
+    icon: "mdi:identifier"
+    optimistic: true
+    initial_value: ""
+    restore_value: true
+    min_length: 12
+    max_length: 12
+    mode: text
+    entity_category: "config"
+    on_value:
+      then:
+        - lambda: |-
+            // Check if MAC contains only hex characters
+            std::string mac_str = x;
+            bool valid_hex = true;
+
+            for (char c : mac_str) {
+                if (!isxdigit(c)) {
+                    valid_hex = false;
+                    break;
+                }
+            }
+
+            if (valid_hex || mac_str.empty()) {
+                // Store the MAC in uppercase for consistency
+                std::string mac_upper = mac_str;
+                std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), ::toupper);
+                id(target_mac) = mac_upper;
+                ESP_LOGI("mac_update", "Target MAC stored: %s", mac_upper.c_str());
+            } else {
+                ESP_LOGW("mac_update", "Invalid MAC format: %s - must contain only hex digits", mac_str.c_str());
+            }
+
+  - platform: template
+    name: "${friendly_name} PIN"
+    id: device_pin
+    icon: "mdi:numeric"
+    optimistic: true
+    initial_value: "0000"
+    restore_value: true
+    min_length: 4
+    max_length: 4
+    mode: text
+    entity_category: "config"
+    on_value:
+      then:
+        - lambda: |-
+            id(stored_pin) = x;
+            ESP_LOGD("pin_update", "PIN stored: %s", x.c_str());
+
+# Buttons for device management
+button:
+  - platform: template
+    name: "Apply Changes & Restart"
+    icon: "mdi:restart"
+    on_press:
+      - lambda: |-
+          std::string formatted_mac = id(target_mac);
+          if (!formatted_mac.empty()) {
+            std::transform(formatted_mac.begin(), formatted_mac.end(), formatted_mac.begin(), ::toupper);
+          }
+
+          id(target_mac) = formatted_mac;
+
+          ESP_LOGI("main", "Restarting with device name: %s, MAC: %s, PIN: %s",
+              id(device_name).c_str(),
+              formatted_mac.empty() ? "any" : formatted_mac.c_str(),
+              id(stored_pin).c_str());
+
+          if (!formatted_mac.empty()) {
+            ESP_LOGI("main", "Connection will require BOTH name AND MAC to match exactly");
+          } else {
+            ESP_LOGI("main", "Connection will be based on device name only");
+          }
+
+          if (id(star2octo).connected()) {
+            id(star2octo).disconnect();
+          }
+          id(star2octo).set_address(0);
+
+      - homeassistant.service:
+          service: esphome.restart
+
+  - platform: template
+    name: "Search for Device"
+    icon: "mdi:bluetooth-search"
+    on_press:
+      - lambda: |-
+          if (id(star2octo).connected()) {
+            ESP_LOGI("BLE", "Disconnecting current connection before search");
+            id(star2octo).disconnect();
+            delay(500);
+          }
+
+          id(star2octo).set_address(0);
+          
+          // Make sure scanning is enabled when manually searching
+          id(pause_ble_scanning) = false;
+
+          std::string search_msg = "Starting device search for: " + id(device_name);
+          std::string target_mac_str = id(target_mac);
+
+          if (!target_mac_str.empty()) {
+            search_msg += " (MAC: " + target_mac_str + ")";
+            ESP_LOGI("BLE", "%s", search_msg.c_str());
+            ESP_LOGI("BLE", "Device must match BOTH name AND MAC to connect");
+          } else {
+            search_msg += " (any MAC address)";
+            ESP_LOGI("BLE", "%s", search_msg.c_str());
+            ESP_LOGI("BLE", "Device will be selected by name only");
+          }
+
+          ESP_LOGI("BLE", "Restarting BLE scan...");
+          id(ble_tracker).start_scan();
+  
+  - platform: template
+    name: "Reset BLE Connection"
+    icon: "mdi:bluetooth-refresh"
+    on_press:
+      - script.execute: reconnect_and_reset
+
+  - platform: template
+    name: "Calibrate Head"
+    icon: "mdi:ruler"
+    on_press:
+      - lambda: |-
+          id(calibration_mode) = 1; // Head calibration mode
+          id(calibration_start_time) = millis();
+          if (id(debug_mode)) {
+            ESP_LOGI("calibration", "Starting head calibration...");
+          }
+      - binary_sensor.template.publish:
+          id: calibration_active
+          state: true
+      - script.execute: calibrate_head_up
+          
+  - platform: template
+    name: "Calibrate Feet"
+    icon: "mdi:ruler"
+    on_press:
+      - lambda: |-
+          id(calibration_mode) = 2; // Feet calibration mode
+          id(calibration_start_time) = millis();
+          if (id(debug_mode)) {
+            ESP_LOGI("calibration", "Starting feet calibration...");
+          }
+      - binary_sensor.template.publish:
+          id: calibration_active
+          state: true
+      - script.execute: calibrate_feet_up
+          
+  - platform: template
+    name: "CALIBRATION STOP"
+    icon: "mdi:check-circle-outline"
+    on_press:
+      - script.execute: calibration_stop
+          
+  - platform: template
+    name: "STOP ALL MOVEMENT"
+    id: end_move
+    icon: "mdi:stop-circle-outline"
+    on_press:
+      - logger.log: "Stopping all commands"
+      - script.execute: stop_all_movements
+
+# Status Indicators and Sensors
+binary_sensor:
+  - platform: template
+    name: "Remote connection status"
+    id: remote_connection_status
+
+  - platform: template
+    name: "Calibration Active"
+    id: calibration_active
+  
+  # Movement status sensors
+  - platform: template
+    name: "Head Movement Active"
+    id: head_movement_active
+  - platform: template
+    name: "Feet Movement Active"
+    id: feet_movement_active
+  - platform: template
+    name: "Both Movement Active"
+    id: both_movement_active
+
+text_sensor:
+  - platform: template
+    name: "Connection Status"
+    icon: "mdi:bluetooth-settings"
+    update_interval: 60s
+    lambda: |-
+      std::string info = id(device_name) + " (" +
+                        (id(star2octo).connected() ? "Connected" : "Disconnected") + ")";
+      if (!id(target_mac).empty()) {
+        info += " [MAC: " + id(target_mac) + "]";
+      }
+      return info;
+
+  - platform: template
+    name: "Head Position Display"
+    id: head_position_display
+    update_interval: 1s
+    lambda: |-
+      char buffer[16];
+      sprintf(buffer, "%.1f%%", id(head_current_position));
+      return {buffer};
+
+  - platform: template
+    name: "Head Position Debug"
+    id: head_position_debug
+
+  - platform: template
+    name: "Feet Position Display"
+    id: feet_position_display
+    update_interval: 1s
+    lambda: |-
+      char buffer[16];
+      sprintf(buffer, "%.1f%%", id(feet_current_position));
+      return {buffer};
+  
+  - platform: template
+    name: "Feet Position Debug"
+    id: feet_position_debug
+
+
+# Sliders for position control
+number:
+  - platform: template
+    name: "Head Position"
+    id: head_position
+    min_value: 0
+    max_value: 100
+    step: 1  # More precise control
+    mode: slider
+    update_interval: 1s
+    icon: "mdi:bed-outline"
+    set_action:
+      then:
+        - lambda: |-
+            // Log the current and target positions for debugging
+            ESP_LOGI("position", "Current position: %.4f, Target position: %.4f", 
+                     id(head_current_position), x);
+            
+            // Store the target position
+            id(target_head_position) = x;
+            id(head_position_debug).publish_state(
+                ("Moving from " + std::to_string(id(head_current_position)) + 
+                 "% to " + std::to_string(x) + "%").c_str()
+            );
+        # Execute movement only if significant change
+        - if:
+            condition:
+              lambda: 'return std::abs(x - id(head_current_position)) >= 0.5f;'
+            then:
+              - script.execute:
+                  id: move_head_to_position
+    lambda: |-
+      return id(head_current_position);
+      
+  - platform: template
+    name: "Feet Position"
+    id: feet_position
+    min_value: 0
+    max_value: 100
+    step: 1  # More precise control
+    mode: slider
+    update_interval: 1s
+    icon: "mdi:foot-print"
+    set_action:
+      then:
+        - lambda: |-
+            // Log the current and target positions for debugging
+            ESP_LOGI("position", "Current feet position: %.4f, Target position: %.4f", 
+                     id(feet_current_position), x);
+            
+            // Store the target position
+            id(target_feet_position) = x;
+            id(feet_position_debug).publish_state(
+                ("Moving from " + std::to_string(id(feet_current_position)) + 
+                 "% to " + std::to_string(x) + "%").c_str()
+            );
+        # Execute movement only if significant change
+        - if:
+            condition:
+              lambda: 'return std::abs(x - id(feet_current_position)) >= 0.5f;'
+            then:
+              - script.execute:
+                  id: move_feet_to_position
+    lambda: |-
+      return id(feet_current_position);
+
+# Switches for movement control
+switch:
+  - platform: template
+    name: "Bed light"
+    id: bed_light
+    icon: "mdi:lightbulb-outline"
+    optimistic: true
+    turn_on_action:
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x20, 0x72, 0x00, 0x08, 0xde, 0x00, 0x01, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x40]
+    turn_off_action:
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x20, 0x72, 0x00, 0x08, 0xdf, 0x00, 0x01, 0x02, 0x01, 0x01, 0x01, 0x01, 0x00, 0x40]
+
+  # Head Up Movement - Fixed to remain on
+  - platform: template
+    name: "Head Up Movement"
+    id: head_up_movement
+    icon: "mdi:arrow-up-bold"
+    optimistic: false
+    restore_mode: ALWAYS_OFF
+    
+    lambda: |-
+      return id(continuous_movement_active) && id(current_movement_type) == 1;
+    
+    turn_on_action:
+      # Check if feet are already moving up
+      - if:
+          condition:
+            lambda: 'return id(continuous_movement_active) && id(current_movement_type) == 3;'
+          then:
+            # Feet already moving up, switch to both up
+            - logger.log: "Feet already moving up, switching to both up"
+            - switch.turn_off: feet_up_movement
+            - delay: 150ms
+            - switch.turn_on: both_up_movement
+          else:
+            # First, stop any existing movements completely
+            - script.execute: stop_all_movements
+            - delay: 500ms  # INCREASED delay for stability
+            
+            # Initialize movement parameters
+            - lambda: |-
+                // Capture the current position as start position
+                id(head_start_position) = id(head_current_position);
+                id(movement_start_time) = millis();
+                id(continuous_movement_active) = true;
+                id(current_movement_type) = 1;  // Head up
+                id(target_head_position) = 100.0f;  // Full up
+                
+                if (id(debug_mode)) {
+                  ESP_LOGI("movement", "Continuous Head Up Movement initiated. Start Position: %.1f%%", 
+                          id(head_start_position));
+                }
+            
+            # Publish movement status
+            - binary_sensor.template.publish:
+                id: head_movement_active
+                state: true
+            
+            # Start continuous movement script
+            - script.execute: head_up_movement_continuous
+    
+    turn_off_action:
+      # Calculate and update final position
+      - lambda: |-
+          // Calculate elapsed time and position change
+          uint32_t elapsed_time = millis() - id(movement_start_time);
+          float position_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+          
+          // Apply position change based on direction
+          float new_position = id(head_start_position) + position_change;
+          
+          // Cap at limits
+          if (new_position > 100.0f) new_position = 100.0f;
+          
+          // Update position state
+          id(head_current_position) = new_position;
+          id(head_position).publish_state(new_position);
+          
+          // Reset movement states
+          id(continuous_movement_active) = false;
+          id(current_movement_type) = 0;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Head Up Movement stopped. Final position: %.1f%%", new_position);
+          }
+      
+      # Stop movement and publish status
+      - script.stop: head_up_movement_continuous
+      - binary_sensor.template.publish:
+          id: head_movement_active
+          state: false
+      
+      # Send explicit stop command
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      # Make sure it stops by sending a second stop command
+      - delay: 100ms
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+
+  # Head Down Movement
+  - platform: template
+    name: "Head Down Movement"
+    id: head_down_movement
+    icon: "mdi:arrow-down-bold"
+    optimistic: false
+    restore_mode: ALWAYS_OFF
+    
+    lambda: |-
+      return id(continuous_movement_active) && id(current_movement_type) == 2;
+    
+    turn_on_action:
+      # Check if feet are already moving down
+      - if:
+          condition:
+            lambda: 'return id(continuous_movement_active) && id(current_movement_type) == 4;'
+          then:
+            # Feet already moving down, switch to both down
+            - logger.log: "Feet already moving down, switching to both down"
+            - switch.turn_off: feet_down_movement
+            - delay: 150ms
+            - switch.turn_on: both_down_movement
+          else:
+            # First, stop any existing movements completely
+            - script.execute: stop_all_movements
+            - delay: 500ms  # INCREASED delay for stability
+            
+            # Initialize movement parameters
+            - lambda: |-
+                // Capture the current position as start position
+                id(head_start_position) = id(head_current_position);
+                id(movement_start_time) = millis();
+                id(continuous_movement_active) = true;
+                id(current_movement_type) = 2;  // Head down
+                id(target_head_position) = 0.0f;  // Full down
+                
+                if (id(debug_mode)) {
+                  ESP_LOGI("movement", "Continuous Head Down Movement initiated. Start Position: %.1f%%", 
+                          id(head_start_position));
+                }
+            
+            # Publish movement status
+            - binary_sensor.template.publish:
+                id: head_movement_active
+                state: true
+            
+            # Start continuous movement script
+            - script.execute: head_down_movement_continuous
+    
+    turn_off_action:
+      # Calculate and update final position
+      - lambda: |-
+          // Calculate elapsed time and position change
+          uint32_t elapsed_time = millis() - id(movement_start_time);
+          float position_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+          
+          // Apply position change based on direction
+          float new_position = id(head_start_position) - position_change;
+          
+          // Cap at limits
+          if (new_position < 0.0f) new_position = 0.0f;
+          
+          // Update position state
+          id(head_current_position) = new_position;
+          id(head_position).publish_state(new_position);
+          
+          // Reset movement states
+          id(continuous_movement_active) = false;
+          id(current_movement_type) = 0;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Head Down Movement stopped. Final position: %.1f%%", new_position);
+          }
+      
+      # Stop movement and publish status
+      - script.stop: head_down_movement_continuous
+      - binary_sensor.template.publish:
+          id: head_movement_active
+          state: false
+      
+      # Send explicit stop command
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      # Make sure it stops
+      - delay: 100ms
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+
+# Feet Up Movement
+  - platform: template
+    name: "Feet Up Movement"
+    id: feet_up_movement
+    icon: "mdi:arrow-up-bold"
+    optimistic: false
+    restore_mode: ALWAYS_OFF
+    
+    lambda: |-
+      return id(continuous_movement_active) && id(current_movement_type) == 3;
+    
+    turn_on_action:
+      # Check if head is already moving up
+      - if:
+          condition:
+            lambda: 'return id(continuous_movement_active) && id(current_movement_type) == 1;'
+          then:
+            # Head already moving up, switch to both up
+            - logger.log: "Head already moving up, switching to both up"
+            - switch.turn_off: head_up_movement
+            - delay: 150ms
+            - switch.turn_on: both_up_movement
+          else:
+            # First, stop any existing movements completely
+            - script.execute: stop_all_movements
+            - delay: 500ms  # INCREASED delay for stability
+            
+            # Initialize movement parameters
+            - lambda: |-
+                // Capture the current position as start position
+                id(head_start_position) = id(feet_current_position);
+                id(movement_start_time) = millis();
+                id(continuous_movement_active) = true;
+                id(current_movement_type) = 3;  // Feet up
+                id(target_feet_position) = 100.0f;  // Full up
+                
+                if (id(debug_mode)) {
+                  ESP_LOGI("movement", "Continuous Feet Up Movement initiated. Start Position: %.1f%%", 
+                          id(head_start_position));
+                }
+            
+            # Publish movement status
+            - binary_sensor.template.publish:
+                id: feet_movement_active
+                state: true
+            
+            # Start continuous movement script
+            - script.execute: feet_up_movement_continuous
+    
+    turn_off_action:
+      # Calculate and update final position
+      - lambda: |-
+          // Calculate elapsed time and position change
+          uint32_t elapsed_time = millis() - id(movement_start_time);
+          float position_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+          
+          // Apply position change based on direction
+          float new_position = id(head_start_position) + position_change;
+          
+          // Cap at limits
+          if (new_position > 100.0f) new_position = 100.0f;
+          
+          // Update position state
+          id(feet_current_position) = new_position;
+          id(feet_position).publish_state(new_position);
+          
+          // Reset movement states
+          id(continuous_movement_active) = false;
+          id(current_movement_type) = 0;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Feet Up Movement stopped. Final position: %.1f%%", new_position);
+          }
+      
+      # Stop movement and publish status
+      - script.stop: feet_up_movement_continuous
+      - binary_sensor.template.publish:
+          id: feet_movement_active
+          state: false
+      
+      # Send explicit stop command
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      # Make sure it stops by sending a second stop command
+      - delay: 100ms
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+
+  # Feet Down Movement
+  - platform: template
+    name: "Feet Down Movement"
+    id: feet_down_movement
+    icon: "mdi:arrow-down-bold"
+    optimistic: false
+    restore_mode: ALWAYS_OFF
+    
+    lambda: |-
+      return id(continuous_movement_active) && id(current_movement_type) == 4;
+    
+    turn_on_action:
+      # Check if head is already moving down
+      - if:
+          condition:
+            lambda: 'return id(continuous_movement_active) && id(current_movement_type) == 2;'
+          then:
+            # Head already moving down, switch to both down
+            - logger.log: "Head already moving down, switching to both down"
+            - switch.turn_off: head_down_movement
+            - delay: 150ms
+            - switch.turn_on: both_down_movement
+          else:
+            # First, stop any existing movements completely
+            - script.execute: stop_all_movements
+            - delay: 500ms  # INCREASED delay for stability
+            
+            # Initialize movement parameters
+            - lambda: |-
+                // Capture the current position as start position
+                id(movement_start_position) = id(feet_current_position);
+                id(movement_start_time) = millis();
+                id(continuous_movement_active) = true;
+                id(current_movement_type) = 4;  // Feet down
+                
+                if (id(debug_mode)) {
+                  ESP_LOGI("movement", "Continuous Feet Down Movement initiated. Start Position: %.1f%%", 
+                          id(movement_start_position));
+                }
+            
+            # Publish movement status
+            - binary_sensor.template.publish:
+                id: feet_movement_active
+                state: true
+            
+            # Start continuous movement script
+            - script.execute: feet_down_movement_continuous
+    
+    turn_off_action:
+      # Calculate and update final position
+      - lambda: |-
+          // Calculate elapsed time and position change
+          uint32_t elapsed_time = millis() - id(movement_start_time);
+          float position_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+          
+          // Apply position change based on direction
+          float new_position = id(movement_start_position) - position_change;
+          
+          // Cap at limits
+          if (new_position < 0.0f) new_position = 0.0f;
+          
+          // Update position state
+          id(feet_current_position) = new_position;
+          id(feet_position).publish_state(new_position);
+          
+          // Reset movement states
+          id(continuous_movement_active) = false;
+          id(current_movement_type) = 0;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Feet Down Movement stopped. Final position: %.1f%%", new_position);
+          }
+      
+      # Stop movement and publish status
+      - script.stop: feet_down_movement_continuous
+      - binary_sensor.template.publish:
+          id: feet_movement_active
+          state: false
+      
+      # Send explicit stop command twice
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      - delay: 100ms
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+
+# Both Up Movement
+  - platform: template
+    name: "Both Up Movement"
+    id: both_up_movement
+    icon: "mdi:arrow-up-bold"
+    optimistic: false
+    restore_mode: ALWAYS_OFF
+    
+    lambda: |-
+      return id(continuous_movement_active) && id(current_movement_type) == 5;
+    
+    turn_on_action:
+      # First, stop any existing movements completely
+      - script.execute: stop_all_movements
+      - delay: 500ms  # INCREASED delay for stability
+      
+      # Initialize movement parameters
+      - lambda: |-
+          // Capture the current positions as start positions
+          id(head_start_position) = id(head_current_position);
+          id(movement_start_position) = id(feet_current_position);
+          id(movement_start_time) = millis();
+          id(continuous_movement_active) = true;
+          id(current_movement_type) = 5;  // Both up
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Continuous Both Up Movement initiated. Head: %.1f%%, Feet: %.1f%%", 
+                    id(head_start_position), id(movement_start_position));
+          }
+      
+      # Publish movement status
+      - binary_sensor.template.publish:
+          id: both_movement_active
+          state: true
+      
+      # Start continuous movement script
+      - script.execute: both_up_movement_continuous
+    
+    turn_off_action:
+      # Calculate and update final positions
+      - lambda: |-
+          // Calculate elapsed time and position change
+          uint32_t elapsed_time = millis() - id(movement_start_time);
+          
+          // Update head position
+          float head_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+          float new_head_position = id(head_start_position) + head_change;
+          if (new_head_position > 100.0f) new_head_position = 100.0f;
+          id(head_current_position) = new_head_position;
+          id(head_position).publish_state(new_head_position);
+          
+          // Update feet position
+          float feet_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+          float new_feet_position = id(movement_start_position) + feet_change;
+          if (new_feet_position > 100.0f) new_feet_position = 100.0f;
+          id(feet_current_position) = new_feet_position;
+          id(feet_position).publish_state(new_feet_position);
+          
+          // Reset movement states
+          id(continuous_movement_active) = false;
+          id(current_movement_type) = 0;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Both Up Movement stopped. Head: %.1f%%, Feet: %.1f%%", 
+                    new_head_position, new_feet_position);
+          }
+      
+      # Stop movement and publish status
+      - script.stop: both_up_movement_continuous
+      - binary_sensor.template.publish:
+          id: both_movement_active
+          state: false
+      
+      # Send explicit stop command twice
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      - delay: 100ms
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+
+  # Both Down Movement
+  - platform: template
+    name: "Both Down Movement"
+    id: both_down_movement
+    icon: "mdi:arrow-down-bold"
+    optimistic: false
+    restore_mode: ALWAYS_OFF
+    
+    lambda: |-
+      return id(continuous_movement_active) && id(current_movement_type) == 6;
+    
+    turn_on_action:
+      # First, stop any existing movements completely
+      - script.execute: stop_all_movements
+      - delay: 500ms  # INCREASED delay for stability
+      
+      # Initialize movement parameters
+      - lambda: |-
+          // Capture the current positions as start positions
+          id(head_start_position) = id(head_current_position);
+          id(movement_start_position) = id(feet_current_position);
+          id(movement_start_time) = millis();
+          id(continuous_movement_active) = true;
+          id(current_movement_type) = 6;  // Both down
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Continuous Both Down Movement initiated. Head: %.1f%%, Feet: %.1f%%", 
+                    id(head_start_position), id(movement_start_position));
+          }
+      
+      # Publish movement status
+      - binary_sensor.template.publish:
+          id: both_movement_active
+          state: true
+      
+      # Start continuous movement script
+      - script.execute: both_down_movement_continuous
+    
+    turn_off_action:
+      # Calculate and update final positions
+      - lambda: |-
+          // Calculate elapsed time and position change
+          uint32_t elapsed_time = millis() - id(movement_start_time);
+          
+          // Update head position
+          float head_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+          float new_head_position = id(head_start_position) - head_change;
+          if (new_head_position < 0.0f) new_head_position = 0.0f;
+          id(head_current_position) = new_head_position;
+          id(head_position).publish_state(new_head_position);
+          
+          // Update feet position
+          float feet_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+          float new_feet_position = id(movement_start_position) - feet_change;
+          if (new_feet_position < 0.0f) new_feet_position = 0.0f;
+          id(feet_current_position) = new_feet_position;
+          id(feet_position).publish_state(new_feet_position);
+          
+          // Reset movement states
+          id(continuous_movement_active) = false;
+          id(current_movement_type) = 0;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Both Down Movement stopped. Head: %.1f%%, Feet: %.1f%%", 
+                    new_head_position, new_feet_position);
+          }
+      
+      # Stop movement and publish status
+      - script.stop: both_down_movement_continuous
+      - binary_sensor.template.publish:
+          id: both_movement_active
+          state: false
+      
+      # Send explicit stop command twice
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      - delay: 100ms
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+
+script:
+  # Connection management script
+  - id: keep_connection_alive
+    mode: restart
+    then:
+      - lambda: |-
+          if (!id(star2octo).connected()) {
+            ESP_LOGW("keep_alive", "Not connected during keep-alive, aborting");
+            return;
+          }
+      # Add an explicit connection check 
+      - if:
+          condition:
+            lambda: return id(star2octo).connected();
+          then:
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x20, 0x43, 0x00, 0x04, 0x00, 0x02, 0x03, 0x04, 0x05, 0x40]
+            - lambda: |-
+                ESP_LOGD("keep_alive", "Keep-alive packet sent");
+      - delay: 30s
+      - script.execute: keep_connection_alive
+  
+  - id: reconnect_and_reset
+    mode: restart
+    then:
+      - logger.log:
+          format: "Attempting to reconnect and reset BLE connection"
+          level: INFO
+      - lambda: |-
+          if (id(star2octo).connected()) {
+            id(star2octo).disconnect();
+          }
+      - delay: 500ms
+      - lambda: |-
+          id(star2octo).set_address(0);
+          id(pause_ble_scanning) = false;
+      - delay: 500ms
+      - esp32_ble_tracker.start_scan:
+          id: ble_tracker
+
+  # Script to acquire movement lock
+  - id: acquire_movement_lock
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(movement_in_progress)) {
+            if (id(debug_mode)) {
+              ESP_LOGW("movement_lock", "Cannot start new movement - movement already in progress");
+            }
+          } else {
+            // No movement in progress, acquire the lock
+            id(movement_in_progress) = true;
+            if (id(debug_mode)) {
+              ESP_LOGD("movement_lock", "Movement lock acquired");
+            }
+          }
+
+  # Script to release movement lock
+  - id: release_movement_lock
+    mode: restart
+    then:
+      - lambda: |-
+          id(movement_in_progress) = false;
+          if (id(debug_mode)) {
+            ESP_LOGD("movement_lock", "Movement lock released");
+          }
+  
+  # IMPROVED: Stop all movements script
+  - id: stop_all_movements
+    mode: restart
+    then:
+      # Only stop scripts that actually exist in your configuration
+      - script.stop: head_up_movement_continuous
+      - script.stop: head_down_movement_continuous
+      - script.stop: feet_up_movement_continuous
+      - script.stop: feet_down_movement_continuous
+      - script.stop: both_up_movement_continuous
+      - script.stop: both_down_movement_continuous
+      - script.stop: move_head_up_for_duration
+      - script.stop: move_head_down_for_duration
+      - script.stop: move_feet_up_for_duration
+      - script.stop: move_feet_down_for_duration
+      - script.stop: calibrate_head_up
+      - script.stop: calibrate_feet_up
+      
+      # Turn off all movement switches if they're on
+      - if:
+          condition:
+            switch.is_on: head_up_movement
+          then:
+            - switch.turn_off: head_up_movement
+      
+      - if:
+          condition:
+            switch.is_on: head_down_movement
+          then:
+            - switch.turn_off: head_down_movement
+      
+      - if:
+          condition:
+            switch.is_on: feet_up_movement
+          then:
+            - switch.turn_off: feet_up_movement
+      
+      - if:
+          condition:
+            switch.is_on: feet_down_movement
+          then:
+            - switch.turn_off: feet_down_movement
+      
+      - if:
+          condition:
+            switch.is_on: both_up_movement
+          then:
+            - switch.turn_off: both_up_movement
+      
+      - if:
+          condition:
+            switch.is_on: both_down_movement
+          then:
+            - switch.turn_off: both_down_movement
+      
+      # Reset all movement states
+      - binary_sensor.template.publish:
+          id: head_movement_active
+          state: false
+      - binary_sensor.template.publish:
+          id: feet_movement_active
+          state: false
+      - binary_sensor.template.publish:
+          id: both_movement_active
+          state: false
+      
+      # Reset continuous movement state
+      - lambda: |-
+          id(continuous_movement_active) = false;
+          id(current_movement_type) = 0;
+      
+      # Send an explicit stop command
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      # Make sure it stops
+      - delay: 100ms
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      # Log the stop
+      - logger.log:
+          format: "All movements stopped"
+          level: DEBUG
+
+# Head up continuous movement
+  - id: head_up_movement_continuous
+    mode: restart
+    then:
+      # Comprehensive continuous movement
+      - while:
+          condition:
+            lambda: |-
+              // Continue if movement is active and not at max position
+              return id(continuous_movement_active) && 
+                    id(current_movement_type) == 1 && 
+                    id(head_current_position) < 100.0f;
+          then:
+            # Send continuous UP command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x0b, 0x02, 0x40]
+            
+            # Precise position tracking
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                float position_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+                float new_position = id(head_start_position) + position_change;
+                
+                // Cap at 100%
+                new_position = std::min(new_position, 100.0f);
+                
+                // Update position with significant change threshold
+                if (std::abs(new_position - id(head_current_position)) >= 0.5f) {
+                    id(head_current_position) = new_position;
+                    id(head_position).publish_state(new_position);
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Head position updated to %.1f%%", new_position);
+                    }
+                }
+                
+                // Auto-stop if reached target
+                if (new_position >= 100.0f) {
+                    id(continuous_movement_active) = false;
+                    
+                    // Turn off the switch
+                    if (id(head_up_movement).state) {
+                      id(head_up_movement).turn_off();
+                    }
+                }
+            
+            # Delay to prevent system overload
+            - delay: 300ms
+
+  # Head down continuous movement
+  - id: head_down_movement_continuous
+    mode: restart
+    then:
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: |-
+              // Continue if movement is active and not at min position
+              return id(continuous_movement_active) && 
+                    id(current_movement_type) == 2 && 
+                    id(head_current_position) > 0.0f;
+          then:
+            # Send continuous DOWN command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x0a, 0x02, 0x40]
+            
+            # Precise position tracking
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                float position_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+                float new_position = id(head_start_position) - position_change;
+                
+                // Cap at 0%
+                new_position = std::max(new_position, 0.0f);
+                
+                // Update position with significant change threshold
+                if (std::abs(new_position - id(head_current_position)) >= 0.5f) {
+                    id(head_current_position) = new_position;
+                    id(head_position).publish_state(new_position);
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Head position updated to %.1f%%", new_position);
+                    }
+                }
+                
+                // Auto-stop if reached target
+                if (new_position <= 0.0f) {
+                    id(continuous_movement_active) = false;
+                    
+                    // Turn off the switch
+                    if (id(head_down_movement).state) {
+                      id(head_down_movement).turn_off();
+                    }
+                }
+            
+            # Delay to prevent system overload
+            - delay: 300ms
+
+# Feet up continuous movement
+  - id: feet_up_movement_continuous
+    mode: restart
+    then:
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: |-
+              // Continue if movement is active and not at max position
+              return id(continuous_movement_active) && 
+                    id(current_movement_type) == 3 && 
+                    id(feet_current_position) < 100.0f;
+          then:
+            # Send continuous UP command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x09, 0x04, 0x40]
+            
+            # Precise position tracking
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                float max_duration = id(feet_up_duration);
+                
+                float position_change = std::min(
+                    (elapsed_time / max_duration) * 100.0f, 
+                    100.0f - id(head_start_position)
+                );
+                
+                float new_position = id(head_start_position) + position_change;
+                
+                // Update position if significantly changed
+                if (std::abs(new_position - id(feet_current_position)) >= 0.5f) {
+                    id(feet_current_position) = new_position;
+                    id(feet_position).publish_state(new_position);
+                    
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Feet position: %.1f%% (elapsed: %u ms)", 
+                               new_position, elapsed_time);
+                    }
+                }
+                
+                // Auto-stop if reached 100%
+                if (new_position >= 100.0f) {
+                    id(feet_up_movement).turn_off();
+                }
+            
+            # Prevent system overload
+            - delay: 300ms
+
+  # Feet down continuous movement
+  - id: feet_down_movement_continuous
+    mode: restart
+    then:
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: |-
+              // Continue if movement is active and not at min position
+              return id(continuous_movement_active) && 
+                    id(current_movement_type) == 4 && 
+                    id(feet_current_position) > 0.0f;
+          then:
+            # Send continuous DOWN command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x08, 0x04, 0x40]
+            
+            # Precise position tracking
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                float position_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+                float new_position = id(movement_start_position) - position_change;
+                
+                // Cap at 0%
+                new_position = std::max(new_position, 0.0f);
+                
+                // Update position with significant change threshold
+                if (std::abs(new_position - id(feet_current_position)) >= 0.5f) {
+                    id(feet_current_position) = new_position;
+                    id(feet_position).publish_state(new_position);
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Feet position updated to %.1f%%", new_position);
+                    }
+                }
+                
+                // Auto-stop if reached target
+                if (new_position <= 0.0f) {
+                    id(continuous_movement_active) = false;
+                    
+                    // Turn off the switch
+                    if (id(feet_down_movement).state) {
+                      id(feet_down_movement).turn_off();
+                    }
+                }
+            
+            # Delay to prevent system overload
+            - delay: 300ms
+
+# Both up continuous movement
+  - id: both_up_movement_continuous
+    mode: restart
+    then:
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: |-
+              // Continue if movement is active and not at max position (either head or feet)
+              return id(continuous_movement_active) && 
+                    id(current_movement_type) == 5 && 
+                    (id(head_current_position) < 100.0f || id(feet_current_position) < 100.0f);
+          then:
+            # Send continuous UP command for both sections
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x07, 0x06, 0x40]
+            
+            # Precise position tracking for both head and feet
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                
+                // Update head position
+                float head_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+                float new_head_position = id(head_start_position) + head_change;
+                new_head_position = std::min(new_head_position, 100.0f);
+                
+                if (std::abs(new_head_position - id(head_current_position)) >= 0.5f) {
+                    id(head_current_position) = new_head_position;
+                    id(head_position).publish_state(new_head_position);
+                }
+                
+                // Update feet position
+                float feet_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+                float new_feet_position = id(movement_start_position) + feet_change;
+                new_feet_position = std::min(new_feet_position, 100.0f);
+                
+                if (std::abs(new_feet_position - id(feet_current_position)) >= 0.5f) {
+                    id(feet_current_position) = new_feet_position;
+                    id(feet_position).publish_state(new_feet_position);
+                }
+                
+                if (id(debug_mode)) {
+                  ESP_LOGD("position", "Both positions updated - Head: %.1f%%, Feet: %.1f%%", 
+                           new_head_position, new_feet_position);
+                }
+                
+                // Auto-stop if both reached target
+                if (new_head_position >= 100.0f && new_feet_position >= 100.0f) {
+                    id(continuous_movement_active) = false;
+                    
+                    // Turn off the switch
+                    if (id(both_up_movement).state) {
+                      id(both_up_movement).turn_off();
+                    }
+                }
+            
+            # Delay to prevent system overload
+            - delay: 300ms
+
+  # Both down continuous movement
+  - id: both_down_movement_continuous
+    mode: restart
+    then:
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: |-
+              // Continue if movement is active and not at min position (either head or feet)
+              return id(continuous_movement_active) && 
+                    id(current_movement_type) == 6 && 
+                    (id(head_current_position) > 0.0f || id(feet_current_position) > 0.0f);
+          then:
+            # Send continuous DOWN command for both sections
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x06, 0x06, 0x40]
+            
+            # Precise position tracking for both head and feet
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                
+                // Update head position
+                float head_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+                float new_head_position = id(head_start_position) - head_change;
+                new_head_position = std::max(new_head_position, 0.0f);
+                
+                if (std::abs(new_head_position - id(head_current_position)) >= 0.5f) {
+                    id(head_current_position) = new_head_position;
+                    id(head_position).publish_state(new_head_position);
+                }
+                
+                // Update feet position
+                float feet_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+                float new_feet_position = id(movement_start_position) - feet_change;
+                new_feet_position = std::max(new_feet_position, 0.0f);
+                
+                if (std::abs(new_feet_position - id(feet_current_position)) >= 0.5f) {
+                    id(feet_current_position) = new_feet_position;
+                    id(feet_position).publish_state(new_feet_position);
+                }
+                
+                if (id(debug_mode)) {
+                  ESP_LOGD("position", "Both positions updated - Head: %.1f%%, Feet: %.1f%%", 
+                           new_head_position, new_feet_position);
+                }
+                
+                // Auto-stop if both reached target
+                if (new_head_position <= 0.0f && new_feet_position <= 0.0f) {
+                    id(continuous_movement_active) = false;
+                    
+                    // Turn off the switch
+                    if (id(both_down_movement).state) {
+                      id(both_down_movement).turn_off();
+                    }
+                }
+            
+            # Delay to prevent system overload
+            - delay: 300ms
+
+# Calibrate head script
+  - id: calibrate_head_up
+    mode: single
+    then: 
+      # Stop all existing movements first
+      - script.execute: stop_all_movements
+      - delay: 500ms
+      - logger.log: "Moving head up for calibration..."
+      - lambda: |-
+          // Set calibration mode and start time
+          id(calibration_mode) = 1;
+          id(calibration_start_time) = millis();
+          if (id(debug_mode)) {
+            ESP_LOGI("calibration", "Starting head calibration movement...");
+          }
+      - binary_sensor.template.publish: 
+          id: calibration_active
+          state: true
+      - while: 
+          condition: 
+            lambda: 'return id(calibration_mode) == 1;'
+          then: 
+            - ble_client.ble_write: 
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x0b, 0x02, 0x40]
+            - delay: 300ms
+  
+  # Calibrate feet script
+  - id: calibrate_feet_up
+    mode: single
+    then: 
+      # Stop all existing movements first
+      - script.execute: stop_all_movements
+      - delay: 1000ms  # Longer delay to ensure everything is stopped
+      - logger.log: "Moving feet up for calibration..."
+      - lambda: |-
+          // Set calibration mode and start time
+          id(calibration_mode) = 2;
+          id(calibration_start_time) = millis();
+          if (id(debug_mode)) {
+            ESP_LOGI("calibration", "Starting feet calibration movement...");
+          }
+      - binary_sensor.template.publish: 
+          id: calibration_active
+          state: true
+      
+      # Use direct command sequence instead of while loop
+      - ble_client.ble_write: 
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x09, 0x04, 0x40]
+      - delay: 500ms
+      
+      # Keep sending command periodically until calibration is stopped manually
+      - while: 
+          condition: 
+            lambda: 'return id(calibration_mode) == 2;'
+          then: 
+            - ble_client.ble_write: 
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x09, 0x04, 0x40]
+            - delay: 500ms  # Slightly longer delay
+  
+  # Stop calibration and save values
+  - id: calibration_stop
+    mode: single
+    then: 
+      # Stop all calibration scripts
+      - script.stop: calibrate_head_up
+      - script.stop: calibrate_feet_up
+      
+      # Stop any running movement scripts
+      - script.execute: stop_all_movements
+      
+      # Send stop command to be sure
+      - ble_client.ble_write: 
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      # Calculate and log calibration duration
+      - lambda: |-
+          uint32_t calibration_duration = millis() - id(calibration_start_time);
+          
+          if (id(calibration_mode) == 1) {
+            // Head calibration
+            id(head_up_duration) = calibration_duration;
+            id(head_current_position) = 100.0; // We're at top position now
+            ESP_LOGI("calibration", "Head calibration complete. Duration: %u ms", calibration_duration);
+          } 
+          else if (id(calibration_mode) == 2) {
+            // Feet calibration
+            id(feet_up_duration) = calibration_duration;
+            id(feet_current_position) = 100.0; // We're at top position now
+            ESP_LOGI("calibration", "Feet calibration complete. Duration: %u ms", calibration_duration);
+          }
+          
+          // Reset calibration mode
+          id(calibration_mode) = 0;
+      
+      # Disable calibration indicator
+      - binary_sensor.template.publish: 
+          id: calibration_active
+          state: false
+      
+      # After calibration, prepare to return to 0%
+      - logger.log: "Calibration complete, preparing to return to 0%"
+      
+      # Use move_to_zero to reset position
+      - script.execute: move_to_zero
+
+  # Reset to zero position
+  - id: move_to_zero
+    mode: single
+    then: 
+      # Head down
+      - ble_client.ble_write: 
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x0a, 0x02, 0x40]
+      - delay: 300ms
+      
+      # Track position during movement back to zero
+      - lambda: |-
+          id(head_start_position) = id(head_current_position);
+          id(movement_start_time) = millis();
+          ESP_LOGI("calibration", "Moving head down to 0% position");
+      
+      # Repeat head down movement with position tracking
+      - while:
+          condition:
+            lambda: |-
+              // Continue while position > 0
+              return id(head_current_position) > 0.1f;
+          then:
+            - ble_client.ble_write: 
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x0a, 0x02, 0x40]
+            # Update position tracking
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                float position_change = (float)elapsed_time / (float)id(head_up_duration) * 100.0f;
+                float new_position = id(head_start_position) - position_change;
+                new_position = std::max(new_position, 0.0f);
+                
+                if (std::abs(new_position - id(head_current_position)) >= 0.5f) {
+                    id(head_current_position) = new_position;
+                    id(head_position).publish_state(new_position);
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Head position during zero reset: %.1f%%", new_position);
+                    }
+                }
+            - delay: 300ms
+      
+      # Stop head movement
+      - ble_client.ble_write: 
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      - delay: 300ms
+      
+      # Ensure position is exactly 0
+      - lambda: |-
+          id(head_current_position) = 0.0f;
+          id(head_position).publish_state(0.0f);
+          ESP_LOGI("calibration", "Head position reset to 0%");
+      
+      # Feet down
+      - ble_client.ble_write: 
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x08, 0x04, 0x40]
+      - delay: 300ms
+      
+      # Track position during movement back to zero
+      - lambda: |-
+          id(movement_start_position) = id(feet_current_position);
+          id(movement_start_time) = millis();
+          ESP_LOGI("calibration", "Moving feet down to 0% position");
+      
+      # Repeat feet down movement with position tracking
+      - while:
+          condition:
+            lambda: |-
+              // Continue while position > 0
+              return id(feet_current_position) > 0.1f;
+          then:
+            - ble_client.ble_write: 
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x08, 0x04, 0x40]
+            # Update position tracking
+            - lambda: |-
+                uint32_t elapsed_time = millis() - id(movement_start_time);
+                float position_change = (float)elapsed_time / (float)id(feet_up_duration) * 100.0f;
+                float new_position = id(movement_start_position) - position_change;
+                new_position = std::max(new_position, 0.0f);
+                
+                if (std::abs(new_position - id(feet_current_position)) >= 0.5f) {
+                    id(feet_current_position) = new_position;
+                    id(feet_position).publish_state(new_position);
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Feet position during zero reset: %.1f%%", new_position);
+                    }
+                }
+            - delay: 300ms
+      
+      # Final stop command
+      - ble_client.ble_write: 
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      # Ensure position is exactly 0
+      - lambda: |-
+          id(feet_current_position) = 0.0f;
+          id(feet_position).publish_state(0.0f);
+          ESP_LOGI("calibration", "Move to zero complete. Bed should be flat now.");
+
+# Script to move head to specific position
+  - id: move_head_to_position
+    mode: single
+    then:
+      - lambda: |-
+          // Comprehensive logging for debugging
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Move to position started");
+          }
+          
+          // Always use the global target_head_position
+          float target_percentage = id(target_head_position);
+          float current_percentage = id(head_current_position);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Current Position: %.4f%, Target Position: %.4f%", 
+                     current_percentage, target_percentage);
+          }
+          
+          // Always stop any ongoing movements first
+          id(stop_all_movements).execute();
+          
+          // Check for movement direction and amount
+          bool direction_up = (target_percentage > current_percentage);
+          float position_difference = std::abs(target_percentage - current_percentage);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Movement Direction: %s, Absolute Difference: %.4f%%", 
+                     direction_up ? "UP" : "DOWN", position_difference);
+          }
+          
+          // Minimum movement threshold
+          if (position_difference < 0.5f) {
+            if (id(debug_mode)) {
+              ESP_LOGI("movement", "Position too close. Skipping movement.");
+            }
+            return;
+          }
+          
+          // Compute move duration with consistent type casting
+          uint32_t max_duration = static_cast<uint32_t>(id(head_up_duration));
+          uint32_t move_duration = static_cast<uint32_t>(
+            (position_difference / 100.0f) * max_duration
+          );
+          
+          // Enforce minimum and maximum duration
+          move_duration = move_duration < 300U ? 300U : move_duration;
+          move_duration = move_duration > max_duration ? max_duration : move_duration;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Calculated Move Duration: %u ms", move_duration);
+          }
+          
+          // Set movement parameters
+          id(movement_lock) = true;
+          id(current_movement_type) = direction_up ? 1 : 2;
+          id(movement_start_time) = millis();
+          id(movement_start_position) = current_percentage;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Movement Parameters Set. Start Time: %u, Start Position: %.4f%, Target Position: %.4f%", 
+                     id(movement_start_time), current_percentage, target_percentage);
+          }
+          
+          // Execute appropriate movement script
+          if (direction_up) {
+            id(move_head_up_for_duration).execute(move_duration);
+          } else {
+            id(move_head_down_for_duration).execute(move_duration);
+          }
+  
+  # Script to move feet to specific position
+  - id: move_feet_to_position
+    mode: single
+    then:
+      # Stop any existing movements
+      - script.execute: stop_all_movements
+      - delay: 500ms
+      
+      # Calculate movement parameters
+      - lambda: |-
+          // Always use the global target_feet_position
+          float target_percentage = id(target_feet_position);
+          float current_percentage = id(feet_current_position);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Current Feet Position: %.4f%, Target Position: %.4f%", 
+                     current_percentage, target_percentage);
+          }
+          
+          // Always stop any ongoing movements first
+          id(stop_all_movements).execute();
+          
+          // Check for movement direction and amount
+          bool direction_up = (target_percentage > current_percentage);
+          float position_difference = std::abs(target_percentage - current_percentage);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Feet Movement Direction: %s, Absolute Difference: %.4f%%", 
+                     direction_up ? "UP" : "DOWN", position_difference);
+          }
+          
+          // Minimum movement threshold
+          if (position_difference < 0.5f) {
+            if (id(debug_mode)) {
+              ESP_LOGI("movement", "Position too close. Skipping movement.");
+            }
+            return;
+          }
+          
+          // Compute move duration with consistent type casting
+          uint32_t max_duration = static_cast<uint32_t>(id(feet_up_duration));
+          uint32_t move_duration = static_cast<uint32_t>(
+            (position_difference / 100.0f) * max_duration
+          );
+          
+          // Enforce minimum and maximum duration
+          move_duration = move_duration < 300U ? 300U : move_duration;
+          move_duration = move_duration > max_duration ? max_duration : move_duration;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Calculated Move Duration: %u ms", move_duration);
+          }
+          
+          // Set movement parameters
+          id(movement_lock) = true;
+          id(current_movement_type) = direction_up ? 3 : 4;
+          id(movement_start_time) = millis();
+          id(movement_start_position) = current_percentage;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Movement Parameters Set. Start Time: %u, Start Position: %.4f%, Target Position: %.4f%", 
+                     id(movement_start_time), current_percentage, target_percentage);
+          }
+          
+          // Execute appropriate movement script
+          if (direction_up) {
+            id(move_feet_up_for_duration).execute(move_duration);
+          } else {
+            id(move_feet_down_for_duration).execute(move_duration);
+          }
+
+  # Script to move head up for a specific duration
+  - id: move_head_up_for_duration
+    mode: restart
+    parameters:
+      duration: uint32_t
+    then:
+      # Indicate movement is active
+      - binary_sensor.template.publish:
+          id: head_movement_active
+          state: true
+      
+      # Create a global variable for movement_end_time
+      - globals.set:
+          id: movement_end_time
+          value: !lambda "return millis() + duration;"
+      
+      # Store the starting position for interpolation
+      - lambda: |-
+          // Reset movement parameters
+          id(movement_lock) = true;
+          id(movement_start_time) = millis();
+          id(movement_start_position) = id(head_current_position);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Starting UP movement. Start Position: %.4f%, Duration: %u ms", 
+                     id(movement_start_position), duration);
+          }
+      
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: 'return (millis() < id(movement_end_time));'
+          then:
+            # Calculate and update position precisely
+            - lambda: |-
+                uint32_t current_time = millis();
+                uint32_t elapsed_time = current_time - id(movement_start_time);
+                
+                // Calculate progress as a percentage of total movement time
+                float progress = static_cast<float>(elapsed_time) / static_cast<float>(duration);
+                
+                // Calculate new position using linear interpolation
+                float new_position = id(movement_start_position) + 
+                                     (id(target_head_position) - id(movement_start_position)) * progress;
+                
+                // Ensure position stays within 0-100% range
+                new_position = std::max(0.0f, std::min(new_position, 100.0f));
+                
+                // Update position if it has changed significantly
+                if (std::abs(new_position - id(head_current_position)) >= 0.5f) {
+                    id(head_current_position) = new_position;
+                    id(head_position).publish_state(new_position);
+                    
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Position updated: %.4f%% (elapsed: %u ms)", 
+                               new_position, elapsed_time);
+                    }
+                }
+            
+            # Send continuous movement command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x0b, 0x02, 0x40]
+            
+            # Short delay to prevent system overload
+            - delay: 300ms
+      
+      # Finalize movement
+      - lambda: |-
+          // Ensure we reach the exact target position
+          id(head_current_position) = id(target_head_position);
+          id(head_position).publish_state(id(target_head_position));
+          
+          // Release movement lock
+          id(movement_lock) = false;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "UP Movement complete. Final Position: %.4f%", 
+                     id(head_current_position));
+          }
+      
+      # Stop movement and reset status
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      - binary_sensor.template.publish:
+          id: head_movement_active
+          state: false
+
+# Precise head down movement
+  - id: move_head_down_for_duration
+    mode: restart
+    parameters:
+      duration: uint32_t
+    then:
+      # Indicate movement is active
+      - binary_sensor.template.publish:
+          id: head_movement_active
+          state: true
+      
+      # Create a global variable for movement_end_time
+      - globals.set:
+          id: movement_end_time
+          value: !lambda "return millis() + duration;"
+      
+      # Store the starting position for interpolation
+      - lambda: |-
+          // Reset movement parameters
+          id(movement_lock) = true;
+          id(movement_start_time) = millis();
+          id(movement_start_position) = id(head_current_position);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Starting DOWN movement. Start Position: %.4f%, Duration: %u ms", 
+                     id(movement_start_position), duration);
+          }
+      
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: 'return (millis() < id(movement_end_time));'
+          then:
+            # Calculate and update position precisely
+            - lambda: |-
+                uint32_t current_time = millis();
+                uint32_t elapsed_time = current_time - id(movement_start_time);
+                
+                // Calculate progress as a percentage of total movement time
+                float progress = static_cast<float>(elapsed_time) / static_cast<float>(duration);
+                
+                // Calculate new position using linear interpolation
+                float new_position = id(movement_start_position) - 
+                                     (id(movement_start_position) - id(target_head_position)) * progress;
+                
+                // Ensure position stays within 0-100% range
+                new_position = std::max(0.0f, std::min(new_position, 100.0f));
+                
+                // Update position if it has changed significantly
+                if (std::abs(new_position - id(head_current_position)) >= 0.5f) {
+                    id(head_current_position) = new_position;
+                    id(head_position).publish_state(new_position);
+                    
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Position updated: %.4f%% (elapsed: %u ms)", 
+                               new_position, elapsed_time);
+                    }
+                }
+            
+            # Send continuous movement command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x0a, 0x02, 0x40]
+            
+            # Short delay to prevent system overload
+            - delay: 300ms
+      
+      # Finalize movement
+      - lambda: |-
+          // Ensure we reach the exact target position
+          id(head_current_position) = id(target_head_position);
+          id(head_position).publish_state(id(target_head_position));
+          
+          // Release movement lock
+          id(movement_lock) = false;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "DOWN Movement complete. Final Position: %.4f%", 
+                     id(head_current_position));
+          }
+      
+      # Stop movement and reset status
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      - binary_sensor.template.publish:
+          id: head_movement_active
+          state: false
+
+  - id: move_feet_up_for_duration
+    mode: restart
+    parameters:
+      duration: uint32_t
+    then:
+      # Indicate movement is active
+      - binary_sensor.template.publish:
+          id: feet_movement_active
+          state: true
+      
+      # Create a global variable for movement_end_time
+      - globals.set:
+          id: movement_end_time
+          value: !lambda "return millis() + duration;"
+      
+      # Store the starting position for interpolation
+      - lambda: |-
+          // Reset movement parameters
+          id(movement_lock) = true;
+          id(movement_start_time) = millis();
+          id(movement_start_position) = id(feet_current_position);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Starting UP movement. Start Position: %.4f%, Duration: %u ms", 
+                     id(movement_start_position), duration);
+          }
+      
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: 'return (millis() < id(movement_end_time));'
+          then:
+            # Calculate and update position precisely
+            - lambda: |-
+                uint32_t current_time = millis();
+                uint32_t elapsed_time = current_time - id(movement_start_time);
+                
+                // Calculate progress as a percentage of total movement time
+                float progress = static_cast<float>(elapsed_time) / static_cast<float>(duration);
+                
+                // Calculate new position using linear interpolation
+                float new_position = id(movement_start_position) + 
+                                     (id(target_feet_position) - id(movement_start_position)) * progress;
+                
+                // Ensure position stays within 0-100% range
+                new_position = std::max(0.0f, std::min(new_position, 100.0f));
+                
+                // Update position if it has changed significantly
+                if (std::abs(new_position - id(feet_current_position)) >= 0.5f) {
+                    id(feet_current_position) = new_position;
+                    id(feet_position).publish_state(new_position);
+                    
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Position updated: %.4f%% (elapsed: %u ms)", 
+                               new_position, elapsed_time);
+                    }
+                }
+            
+            # Send continuous movement command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x70, 0x00, 0x01, 0x09, 0x04, 0x40]
+            
+            # Short delay to prevent system overload
+            - delay: 300ms
+      
+      # Finalize movement
+      - lambda: |-
+          // Ensure we reach the exact target position
+          id(feet_current_position) = id(target_feet_position);
+          id(feet_position).publish_state(id(target_feet_position));
+          
+          // Release movement lock
+          id(movement_lock) = false;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "UP Movement complete. Final Position: %.4f%", 
+                     id(feet_current_position));
+          }
+      
+      # Stop movement and reset status
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      - binary_sensor.template.publish:
+          id: feet_movement_active
+          state: false
+
+  - id: move_feet_down_for_duration
+    mode: restart
+    parameters:
+      duration: uint32_t
+    then:
+      # Indicate movement is active
+      - binary_sensor.template.publish:
+          id: feet_movement_active
+          state: true
+      
+      # Create a global variable for movement_end_time
+      - globals.set:
+          id: movement_end_time
+          value: !lambda "return millis() + duration;"
+      
+      # Store the starting position for interpolation
+      - lambda: |-
+          // Reset movement parameters
+          id(movement_lock) = true;
+          id(movement_start_time) = millis();
+          id(movement_start_position) = id(feet_current_position);
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "Starting DOWN movement. Start Position: %.4f%, Duration: %u ms", 
+                     id(movement_start_position), duration);
+          }
+      
+      # Continuous movement loop
+      - while:
+          condition:
+            lambda: 'return (millis() < id(movement_end_time));'
+          then:
+            # Calculate and update position precisely
+            - lambda: |-
+                uint32_t current_time = millis();
+                uint32_t elapsed_time = current_time - id(movement_start_time);
+                
+                // Calculate progress as a percentage of total movement time
+                float progress = static_cast<float>(elapsed_time) / static_cast<float>(duration);
+                
+                // Calculate new position using linear interpolation
+                float new_position = id(movement_start_position) - 
+                                     (id(movement_start_position) - id(target_feet_position)) * progress;
+                
+                // Ensure position stays within 0-100% range
+                new_position = std::max(0.0f, std::min(new_position, 100.0f));
+                
+                // Update position if it has changed significantly
+                if (std::abs(new_position - id(feet_current_position)) >= 0.5f) {
+                    id(feet_current_position) = new_position;
+                    id(feet_position).publish_state(new_position);
+                    
+                    if (id(debug_mode)) {
+                      ESP_LOGD("position", "Position updated: %.4f%% (elapsed: %u ms)", 
+                               new_position, elapsed_time);
+                    }
+                }
+            
+            # Send continuous movement command
+            - ble_client.ble_write:
+                id: star2octo
+                service_uuid: ffe0
+                characteristic_uuid: ffe1
+                value: [0x40, 0x02, 0x71, 0x00, 0x01, 0x08, 0x04, 0x40]
+            
+            # Short delay to prevent system overload
+            - delay: 300ms
+      
+      # Finalize movement
+      - lambda: |-
+          // Ensure we reach the exact target position
+          id(feet_current_position) = id(target_feet_position);
+          id(feet_position).publish_state(id(target_feet_position));
+          
+          // Release movement lock
+          id(movement_lock) = false;
+          
+          if (id(debug_mode)) {
+            ESP_LOGI("movement", "DOWN Movement complete. Final Position: %.4f%", 
+                     id(feet_current_position));
+          }
+      
+      # Stop movement and reset status
+      - ble_client.ble_write:
+          id: star2octo
+          service_uuid: ffe0
+          characteristic_uuid: ffe1
+          value: [0x40, 0x02, 0x73, 0x00, 0x00, 0x0b, 0x40]
+      
+      - binary_sensor.template.publish:
+          id: feet_movement_active
+          state: false

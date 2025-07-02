@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLE Scanner - Home Assistant Addon</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .main-container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            margin: 20px;
+            padding: 30px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #333;
+        }
+        .status-card {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .device-card {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .device-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        .mac-address {
+            font-family: 'Courier New', monospace;
+            background: #f8f9fa;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+        .rssi-indicator {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        .rssi-excellent { background-color: #28a745; }
+        .rssi-good { background-color: #ffc107; }
+        .rssi-poor { background-color: #dc3545; }
+        .btn-custom {
+            border-radius: 25px;
+            padding: 10px 25px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+        }
+        .manual-add-form {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .last-seen {
+            font-size: 0.8em;
+            color: #666;
+        }
+        .proxy-badge {
+            background: #007bff;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7em;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="main-container">
+            <div class="header">
+                <h1><i class="fas fa-bluetooth-b"></i> BLE Scanner</h1>
+                <p class="text-muted">Home Assistant Addon - Bluetooth Low Energy Device Discovery</p>
+            </div>
+
+            <!-- Status Card -->
+            <div class="status-card">
+                <div class="row">
+                    <div class="col-md-3">
+                        <h5><i class="fas fa-signal"></i> Scan Status</h5>
+                        <span id="scanStatus" class="badge bg-secondary">Unknown</span>
+                    </div>
+                    <div class="col-md-3">
+                        <h5><i class="fas fa-mobile-alt"></i> Devices Found</h5>
+                        <span id="deviceCount" class="badge bg-info">0</span>
+                    </div>
+                    <div class="col-md-3">
+                        <h5><i class="fas fa-wifi"></i> ESP32 Proxies</h5>
+                        <span id="proxyCount" class="badge bg-warning">0</span>
+                    </div>
+                    <div class="col-md-3">
+                        <h5><i class="fas fa-clock"></i> Scan Interval</h5>
+                        <span id="scanInterval" class="badge bg-dark">30s</span>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <button id="startScanBtn" class="btn btn-success btn-custom me-2">
+                        <i class="fas fa-play"></i> Start Scan
+                    </button>
+                    <button id="stopScanBtn" class="btn btn-danger btn-custom me-2">
+                        <i class="fas fa-stop"></i> Stop Scan
+                    </button>
+                    <button id="refreshBtn" class="btn btn-primary btn-custom">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
+            </div>
+
+            <!-- Manual Add Device Form -->
+            <div class="manual-add-form">
+                <h5><i class="fas fa-plus-circle"></i> Add Device Manually</h5>
+                <div class="row">
+                    <div class="col-md-3">
+                        <input type="text" id="macAddress" class="form-control" placeholder="MAC Address (XX:XX:XX:XX:XX:XX)">
+                    </div>
+                    <div class="col-md-3">
+                        <input type="text" id="deviceName" class="form-control" placeholder="Device Name">
+                    </div>
+                    <div class="col-md-2">
+                        <input type="number" id="deviceRssi" class="form-control" placeholder="RSSI" value="-50">
+                    </div>
+                    <div class="col-md-2">
+                        <input type="text" id="deviceManufacturer" class="form-control" placeholder="Manufacturer">
+                    </div>
+                    <div class="col-md-2">
+                        <button id="addDeviceBtn" class="btn btn-primary btn-custom w-100">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Devices List -->
+            <div class="row">
+                <div class="col-12">
+                    <h4><i class="fas fa-list"></i> Discovered Devices</h4>
+                    <div id="devicesList" class="loading">
+                        <i class="fas fa-spinner fa-spin fa-2x"></i>
+                        <p>Loading devices...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        class BLEScanner {
+            constructor() {
+                this.devices = [];
+                this.status = {};
+                this.init();
+            }
+
+            async init() {
+                await this.loadStatus();
+                await this.loadDevices();
+                this.setupEventListeners();
+                this.startAutoRefresh();
+            }
+
+            setupEventListeners() {
+                document.getElementById('startScanBtn').addEventListener('click', () => this.startScan());
+                document.getElementById('stopScanBtn').addEventListener('click', () => this.stopScan());
+                document.getElementById('refreshBtn').addEventListener('click', () => this.refresh());
+                document.getElementById('addDeviceBtn').addEventListener('click', () => this.addDevice());
+            }
+
+            async loadStatus() {
+                try {
+                    const response = await fetch('/api/status');
+                    this.status = await response.json();
+                    this.updateStatusDisplay();
+                } catch (error) {
+                    console.error('Error loading status:', error);
+                }
+            }
+
+            async loadDevices() {
+                try {
+                    const response = await fetch('/api/devices');
+                    this.devices = await response.json();
+                    this.renderDevices();
+                } catch (error) {
+                    console.error('Error loading devices:', error);
+                }
+            }
+
+            async startScan() {
+                try {
+                    const response = await fetch('/api/scan/start', { method: 'POST' });
+                    const result = await response.json();
+                    this.showNotification(result.message, 'success');
+                    await this.loadStatus();
+                } catch (error) {
+                    this.showNotification('Error starting scan', 'error');
+                }
+            }
+
+            async stopScan() {
+                try {
+                    const response = await fetch('/api/scan/stop', { method: 'POST' });
+                    const result = await response.json();
+                    this.showNotification(result.message, 'success');
+                    await this.loadStatus();
+                } catch (error) {
+                    this.showNotification('Error stopping scan', 'error');
+                }
+            }
+
+            async addDevice() {
+                const macAddress = document.getElementById('macAddress').value.trim();
+                const name = document.getElementById('deviceName').value.trim();
+                const rssi = parseInt(document.getElementById('deviceRssi').value);
+                const manufacturer = document.getElementById('deviceManufacturer').value.trim();
+
+                if (!macAddress) {
+                    this.showNotification('MAC address is required', 'error');
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/api/devices/${macAddress}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            name: name || 'Unknown Device',
+                            rssi: rssi || -50,
+                            manufacturer: manufacturer || 'Unknown'
+                        })
+                    });
+
+                    if (response.ok) {
+                        this.showNotification('Device added successfully', 'success');
+                        this.clearAddForm();
+                        await this.loadDevices();
+                    } else {
+                        const error = await response.json();
+                        this.showNotification(error.error || 'Error adding device', 'error');
+                    }
+                } catch (error) {
+                    this.showNotification('Error adding device', 'error');
+                }
+            }
+
+            async removeDevice(macAddress) {
+                if (!confirm('Are you sure you want to remove this device?')) {
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/api/devices/${macAddress}`, {
+                        method: 'DELETE'
+                    });
+
+                    if (response.ok) {
+                        this.showNotification('Device removed successfully', 'success');
+                        await this.loadDevices();
+                    } else {
+                        this.showNotification('Error removing device', 'error');
+                    }
+                } catch (error) {
+                    this.showNotification('Error removing device', 'error');
+                }
+            }
+
+            async refresh() {
+                await this.loadStatus();
+                await this.loadDevices();
+                this.showNotification('Data refreshed', 'success');
+            }
+
+            updateStatusDisplay() {
+                document.getElementById('scanStatus').textContent = this.status.running ? 'Running' : 'Stopped';
+                document.getElementById('scanStatus').className = this.status.running ? 'badge bg-success' : 'badge bg-secondary';
+                document.getElementById('deviceCount').textContent = this.status.device_count || 0;
+                document.getElementById('proxyCount').textContent = this.status.proxy_count || 0;
+                document.getElementById('scanInterval').textContent = `${this.status.scan_interval || 30}s`;
+            }
+
+            renderDevices() {
+                const container = document.getElementById('devicesList');
+                
+                if (this.devices.length === 0) {
+                    container.innerHTML = `
+                        <div class="text-center text-muted">
+                            <i class="fas fa-bluetooth-b fa-3x mb-3"></i>
+                            <p>No devices discovered yet. Start scanning to find BLE devices.</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                container.innerHTML = this.devices.map(device => this.renderDeviceCard(device)).join('');
+            }
+
+            renderDeviceCard(device) {
+                const rssiClass = this.getRssiClass(device.rssi);
+                const lastSeen = new Date(device.last_seen).toLocaleString();
+                const proxyBadge = device.proxy ? `<span class="proxy-badge">${device.proxy}</span>` : '';
+                const manualBadge = device.added_manually ? '<span class="badge bg-warning ms-2">Manual</span>' : '';
+
+                return `
+                    <div class="device-card">
+                        <div class="row align-items-center">
+                            <div class="col-md-3">
+                                <h6 class="mb-1">
+                                    <span class="rssi-indicator ${rssiClass}"></span>
+                                    ${device.name}
+                                    ${manualBadge}
+                                </h6>
+                                <div class="mac-address">${device.mac_address}</div>
+                            </div>
+                            <div class="col-md-2">
+                                <strong>RSSI:</strong> ${device.rssi} dBm
+                            </div>
+                            <div class="col-md-2">
+                                <strong>Manufacturer:</strong> ${device.manufacturer || 'Unknown'}
+                            </div>
+                            <div class="col-md-2">
+                                <strong>Services:</strong> ${device.services ? device.services.length : 0}
+                            </div>
+                            <div class="col-md-2">
+                                <strong>Proxy:</strong> ${proxyBadge}
+                            </div>
+                            <div class="col-md-1">
+                                <button class="btn btn-sm btn-outline-danger" onclick="scanner.removeDevice('${device.mac_address}')">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="last-seen mt-2">
+                            <i class="fas fa-clock"></i> Last seen: ${lastSeen}
+                        </div>
+                    </div>
+                `;
+            }
+
+            getRssiClass(rssi) {
+                if (rssi >= -50) return 'rssi-excellent';
+                if (rssi >= -70) return 'rssi-good';
+                return 'rssi-poor';
+            }
+
+            clearAddForm() {
+                document.getElementById('macAddress').value = '';
+                document.getElementById('deviceName').value = '';
+                document.getElementById('deviceRssi').value = '-50';
+                document.getElementById('deviceManufacturer').value = '';
+            }
+
+            showNotification(message, type) {
+                // Simple notification - you could enhance this with a proper toast library
+                const alertClass = type === 'success' ? 'alert-success' : 'alert-danger';
+                const alert = document.createElement('div');
+                alert.className = `alert ${alertClass} alert-dismissible fade show position-fixed`;
+                alert.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+                alert.innerHTML = `
+                    ${message}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                `;
+                document.body.appendChild(alert);
+                
+                setTimeout(() => {
+                    if (alert.parentNode) {
+                        alert.remove();
+                    }
+                }, 5000);
+            }
+
+            startAutoRefresh() {
+                setInterval(() => {
+                    this.loadStatus();
+                    this.loadDevices();
+                }, 10000); // Refresh every 10 seconds
+            }
+        }
+
+        // Initialize the scanner when the page loads
+        let scanner;
+        document.addEventListener('DOMContentLoaded', () => {
+            scanner = new BLEScanner();
+        });
+    </script>
+</body>
+</html> 

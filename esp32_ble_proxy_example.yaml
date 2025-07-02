@@ -1,0 +1,70 @@
+# ESP32 BLE Proxy Configuration Example
+# This is an example ESPHome configuration for setting up an ESP32 as a BLE proxy
+# Copy this to your ESPHome configuration and customize as needed
+
+esphome:
+  name: my-ble-proxy
+  platform: ESP32
+  board: esp32dev
+  framework:
+    type: esp-idf  # Required for Bluetooth proxy
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API for communication
+api:
+  port: 6053
+
+# Enable Over-the-Air updates
+ota:
+  platform: esphome
+
+# WiFi configuration (replace with your network details)
+wifi:
+  ssid: "YOUR_WIFI_SSID"
+  password: "YOUR_WIFI_PASSWORD"
+  ap:
+    ssid: "My_BLE_Proxy_AP"
+    password: "12345678"
+
+# Alternative: Use Ethernet for better performance (if your board supports it)
+# ethernet:
+#   type: LAN8720
+#   mdc_pin: GPIO23
+#   mdio_pin: GPIO18
+#   clk_mode: GPIO17_OUT
+#   phy_addr: 0
+#   power_pin: GPIO12
+
+# Enable BLE tracker with optimized scan parameters
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+
+# Enable Bluetooth proxy
+bluetooth_proxy:
+  active: true
+  connection_slots: 3
+  cache_services: true
+
+# Optional: Add some basic sensors for monitoring
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal Strength"
+    update_interval: 60s
+  
+  - platform: uptime
+    name: "Uptime"
+
+# Optional: Add status indicators
+binary_sensor:
+  - platform: status
+    name: "BLE Proxy Status"
+
+# Optional: Add a restart button
+button:
+  - platform: restart
+    name: "Restart BLE Proxy" 

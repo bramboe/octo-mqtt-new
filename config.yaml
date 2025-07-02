@@ -1,0 +1,46 @@
+---
+name: "BLE Scanner"
+version: "1.0.0"
+slug: "ble_scanner"
+description: "Standalone BLE scanner with web UI for discovering and managing BLE devices"
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: application
+init: false
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "Web UI"
+ingress: true
+ingress_port: 8099
+ingress_entry: /
+panel_icon: mdi:bluetooth
+homeassistant_api: false
+options:
+  esp32_proxies:
+    - name: "ESP32 Proxy 1"
+      host: "192.168.1.100"
+      port: 6053
+  scan_interval: 30
+  log_level: info
+  mqtt_host: "<auto_detect>"
+  mqtt_port: 1883
+  mqtt_user: "<auto_detect>"
+  mqtt_password: "<auto_detect>"
+  mqtt_topic: "ble_scanner/devices"
+schema:
+  esp32_proxies:
+    - name: str
+      host: str
+      port: int
+  scan_interval: int
+  log_level: str
+  mqtt_host: str
+  mqtt_port: int
+  mqtt_user: str
+  mqtt_password: str
+  mqtt_topic: str 

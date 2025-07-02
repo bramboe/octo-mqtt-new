@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.15"
+ADDON_VERSION = "1.0.16"
 
 class BLEScanner:
     def __init__(self):
@@ -507,41 +507,44 @@ class BLEScanner:
         self.mqtt_connected = False
     
     async def connect_esp32_proxy(self, proxy):
-        """Connect to ESP32 BLE proxy using ESPHome API (aioesphomeapi)"""
+        """Robust ESPHome BLE proxy connection loop, smartbed-mqtt style."""
         host = proxy['host']
         port = proxy.get('port', 6053)
         password = proxy.get('password', '')
         proxy_key = f"{host}:{port}"
-        logger.info(f"[BLEPROXY] Connecting to ESPHome API at {host}:{port}")
-        client = APIClient(host, port, password=password)
-        try:
-            await client.connect(login=True)
-            self.proxy_connections[proxy_key] = True
-            logger.info(f"[BLEPROXY] Connected to ESPHome BLE proxy at {host}:{port}")
+        while self.running:
+            client = APIClient(host, port, password=password)
+            try:
+                await client.connect(login=True)
+                self.proxy_connections[proxy_key] = True
+                logger.info(f"[BLEPROXY] Connected to ESPHome BLE proxy at {host}:{port}")
 
-            async def handle_ble_advertisement(advertisement: BluetoothLEAdvertisement):
-                adv = {
-                    'address': advertisement.address,
-                    'name': advertisement.name or 'Unknown Device',
-                    'rssi': advertisement.rssi,
-                    'manufacturer_data': advertisement.manufacturer_data,
-                    'service_uuids': advertisement.service_uuids,
-                }
-                await self.process_ble_advertisement({'bluetooth_le_advertisement': adv}, proxy_key)
+                async def handle_ble_advertisement(advertisement: BluetoothLEAdvertisement):
+                    adv = {
+                        'address': advertisement.address,
+                        'name': advertisement.name or 'Unknown Device',
+                        'rssi': advertisement.rssi,
+                        'manufacturer_data': advertisement.manufacturer_data,
+                        'service_uuids': advertisement.service_uuids,
+                    }
+                    await self.process_ble_advertisement({'bluetooth_le_advertisement': adv}, proxy_key)
 
-            await client.subscribe_bluetooth_le_advertisements(handle_ble_advertisement)
-            logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {host}:{port}")
-            # Keep the connection open for the scan interval
-            await asyncio.sleep(self.scan_interval)
-            await client.disconnect()
-            self.proxy_connections[proxy_key] = False
-            logger.info(f"[BLEPROXY] Disconnected from ESPHome BLE proxy at {host}:{port}")
-        except APIConnectionError as e:
-            self.proxy_connections[proxy_key] = False
-            logger.error(f"[BLEPROXY] ESPHome API connection error: {e}")
-        except Exception as e:
-            self.proxy_connections[proxy_key] = False
-            logger.error(f"[BLEPROXY] Error connecting to ESPHome BLE proxy at {host}:{port}: {e}")
+                await client.subscribe_bluetooth_le_advertisements(handle_ble_advertisement)
+                logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {host}:{port}")
+                # Keep the connection open while running
+                while self.running:
+                    await asyncio.sleep(10)
+                await client.disconnect()
+                self.proxy_connections[proxy_key] = False
+                logger.info(f"[BLEPROXY] Disconnected from ESPHome BLE proxy at {host}:{port}")
+            except APIConnectionError as e:
+                self.proxy_connections[proxy_key] = False
+                logger.error(f"[BLEPROXY] ESPHome API connection error: {e}")
+                await asyncio.sleep(10)  # Wait before retrying
+            except Exception as e:
+                self.proxy_connections[proxy_key] = False
+                logger.error(f"[BLEPROXY] Error connecting to ESPHome BLE proxy at {host}:{port}: {e}")
+                await asyncio.sleep(10)  # Wait before retrying
 
     async def test_websocket_connection(self, proxy):
         """Test WebSocket connection to ESP32 proxy"""

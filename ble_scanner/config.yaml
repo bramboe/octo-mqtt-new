@@ -1,6 +1,6 @@
 ---
 name: "BLE Scanner"
-version: "1.0.6"
+version: "1.0.8"
 slug: "ble_scanner"
 description: "Standalone BLE scanner with web UI for discovering and managing BLE devices"
 url: "https://github.com/bramboe/octo-mqtt-new"
@@ -40,7 +40,7 @@ schema:
   scan_interval: int
   log_level: str
   mqtt_host: str
-  mqtt_port: int
+  mqtt_port: str
   mqtt_user: str
   mqtt_password: str
   mqtt_topic: str 

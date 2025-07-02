@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.6"
+ADDON_VERSION = "1.0.8"
 
 class BLEScanner:
     def __init__(self):
@@ -72,12 +72,16 @@ class BLEScanner:
                 log_level = config.get('log_level', 'info')
                 # MQTT
                 self.mqtt_host = config.get('mqtt_host', None)
-                mqtt_port_config = config.get('mqtt_port', 1883)
+                mqtt_port_config = config.get('mqtt_port', '1883')
                 # Handle auto_detect for port
                 if mqtt_port_config == '<auto_detect>' or mqtt_port_config == '<auto_detect>':
                     self.mqtt_port = 1883  # Default MQTT port
                 else:
-                    self.mqtt_port = int(mqtt_port_config)
+                    try:
+                        self.mqtt_port = int(mqtt_port_config)
+                    except (ValueError, TypeError):
+                        logger.warning(f"[CONFIG] Invalid MQTT port '{mqtt_port_config}', using default 1883")
+                        self.mqtt_port = 1883
                 self.mqtt_user = config.get('mqtt_user', None)
                 self.mqtt_password = config.get('mqtt_password', None)
                 self.mqtt_topic = config.get('mqtt_topic', 'ble_scanner/devices')

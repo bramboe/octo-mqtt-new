@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.4"
+ADDON_VERSION = "1.0.5"
 
 class BLEScanner:
     def __init__(self):
@@ -171,7 +171,8 @@ class BLEScanner:
                 'running': self.running,
                 'device_count': len(self.devices),
                 'proxy_count': len(self.esp32_proxies),
-                'scan_interval': self.scan_interval
+                'scan_interval': self.scan_interval,
+                'mqtt_connected': self.mqtt_connected
             })
         
         @self.app.route('/api/config', methods=['GET'])
@@ -220,7 +221,7 @@ class BLEScanner:
             logger.info("[MQTT] MQTT host not set, MQTT will be disabled.")
             self.mqtt_client = None
             return
-        self.mqtt_client = mqtt.Client()
+        self.mqtt_client = mqtt.Client(client_id=f"ble_scanner_{int(time.time())}")
         if self.mqtt_user and self.mqtt_user != '<auto_detect>':
             self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
         self.mqtt_client.on_connect = self.on_mqtt_connect
@@ -235,14 +236,25 @@ class BLEScanner:
     
     def on_mqtt_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            logger.info("Connected to MQTT broker.")
+            logger.info("[MQTT] Successfully connected to MQTT broker")
             self.mqtt_connected = True
         else:
-            logger.error(f"Failed to connect to MQTT broker, code {rc}")
+            error_codes = {
+                1: "Incorrect protocol version",
+                2: "Invalid client identifier", 
+                3: "Server unavailable",
+                4: "Bad username or password",
+                5: "Not authorized"
+            }
+            error_msg = error_codes.get(rc, f"Unknown error code {rc}")
+            logger.error(f"[MQTT] Failed to connect to MQTT broker: {error_msg} (code {rc})")
             self.mqtt_connected = False
     
     def on_mqtt_disconnect(self, client, userdata, rc):
-        logger.warning("Disconnected from MQTT broker.")
+        if rc == 0:
+            logger.info("[MQTT] Cleanly disconnected from MQTT broker")
+        else:
+            logger.warning(f"[MQTT] Unexpectedly disconnected from MQTT broker (code {rc})")
         self.mqtt_connected = False
     
     async def connect_esp32_proxy(self, proxy):
@@ -315,10 +327,15 @@ class BLEScanner:
         if self.mqtt_client and self.mqtt_connected:
             try:
                 payload = json.dumps(device)
-                self.mqtt_client.publish(self.mqtt_topic, payload, qos=0, retain=False)
-                logger.debug(f"Published device to MQTT: {device['mac_address']}")
+                result = self.mqtt_client.publish(self.mqtt_topic, payload, qos=0, retain=False)
+                if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                    logger.debug(f"[MQTT] Published device {device['mac_address']} to {self.mqtt_topic}")
+                else:
+                    logger.error(f"[MQTT] Failed to publish device {device['mac_address']}: error code {result.rc}")
             except Exception as e:
-                logger.error(f"Failed to publish to MQTT: {e}")
+                logger.error(f"[MQTT] Exception publishing device {device['mac_address']}: {e}")
+        else:
+            logger.debug(f"[MQTT] Skipping publish for {device['mac_address']} - MQTT not connected")
     
     async def scan_loop(self):
         logger.info("[SCAN] Starting BLE scan loop")

@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.11"
+ADDON_VERSION = "1.0.12"
 
 class BLEScanner:
     def __init__(self):
@@ -242,6 +242,12 @@ class BLEScanner:
             logger.info("[MQTT] Auto-detecting MQTT credentials...")
             self.mqtt_user, self.mqtt_password = self.auto_detect_mqtt_credentials()
             
+        # Only create MQTT client if we have a host
+        if not self.mqtt_host:
+            logger.info("[MQTT] No MQTT host available, MQTT will be disabled.")
+            self.mqtt_client = None
+            return
+            
         self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"ble_scanner_{int(time.time())}")
         if self.mqtt_user and self.mqtt_user != '<auto_detect>':
             self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
@@ -418,7 +424,7 @@ class BLEScanner:
         logger.warning("[MQTT] No working credentials found, MQTT will be disabled")
         return None, None
     
-    def on_mqtt_connect(self, client, userdata, flags, rc):
+    def on_mqtt_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
             logger.info("[MQTT] Successfully connected to MQTT broker")
             self.mqtt_connected = True
@@ -434,7 +440,7 @@ class BLEScanner:
             logger.error(f"[MQTT] Failed to connect to MQTT broker: {error_msg} (code {rc})")
             self.mqtt_connected = False
     
-    def on_mqtt_disconnect(self, client, userdata, rc):
+    def on_mqtt_disconnect(self, client, userdata, rc, properties=None):
         if rc == 0:
             logger.info("[MQTT] Cleanly disconnected from MQTT broker")
         else:

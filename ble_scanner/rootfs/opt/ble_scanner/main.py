@@ -190,29 +190,31 @@ class BLEScanner:
         self.mqtt_connected = False
     
     async def connect_esp32_proxy(self, proxy):
-        """Connect to ESP32 BLE proxy"""
+        """Connect to ESP32 BLE proxy with detailed logging"""
+        uri = f"ws://{proxy['host']}:{proxy['port']}"
+        logger.info(f"[BLEProxy] Attempting connection to {uri}")
+        start_time = time.time()
         try:
-            uri = f"ws://{proxy['host']}:{proxy['port']}"
-            logger.info(f"Connecting to ESP32 proxy: {uri}")
             async with websockets.connect(uri) as websocket:
-                logger.info(f"Connected to ESP32 proxy: {proxy['host']}:{proxy['port']}")
+                logger.info(f"[BLEProxy] Connected to {proxy['host']}:{proxy['port']} after {time.time() - start_time:.2f}s")
                 # Subscribe to BLE advertisements
                 subscribe_msg = {
                     "id": 1,
                     "type": "subscribe_bluetooth_le_advertisements"
                 }
                 await websocket.send(json.dumps(subscribe_msg))
+                logger.info(f"[BLEProxy] Subscribed to BLE advertisements on {proxy['host']}:{proxy['port']}")
                 # Listen for BLE advertisements
                 async for message in websocket:
                     try:
                         data = json.loads(message)
                         await self.process_ble_advertisement(data, f"{proxy['host']}:{proxy['port']}")
                     except json.JSONDecodeError:
-                        logger.warning(f"Invalid JSON from proxy: {message}")
+                        logger.warning(f"[BLEProxy] Invalid JSON from proxy {proxy['host']}:{proxy['port']}: {message}")
                     except Exception as e:
-                        logger.error(f"Error processing message: {e}")
+                        logger.error(f"[BLEProxy] Error processing message from {proxy['host']}:{proxy['port']}: {e}")
         except Exception as e:
-            logger.error(f"Error connecting to ESP32 proxy {proxy['host']}:{proxy['port']}: {e}")
+            logger.error(f"[BLEProxy] Error connecting to {proxy['host']}:{proxy['port']}: {e}")
     
     async def process_ble_advertisement(self, data, proxy_name):
         """Process BLE advertisement data and publish to MQTT if enabled"""

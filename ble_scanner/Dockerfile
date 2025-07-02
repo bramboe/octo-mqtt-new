@@ -16,8 +16,6 @@ RUN \
         py3-pip \
         git \
         gcc \
-        musl-dev \
-        linux-headers \
     \
     && pip3 install --no-cache-dir --upgrade pip \
     && pip3 install --no-cache-dir \

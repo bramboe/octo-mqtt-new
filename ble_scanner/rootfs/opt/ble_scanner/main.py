@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.5"
+ADDON_VERSION = "1.0.6"
 
 class BLEScanner:
     def __init__(self):
@@ -47,6 +47,8 @@ class BLEScanner:
         self.mqtt_topic = "ble_scanner/devices"
         self.mqtt_client = None
         self.mqtt_connected = False
+        # Proxy connection tracking
+        self.proxy_connections = {}
         
         # Load configuration
         self.load_config()
@@ -167,12 +169,15 @@ class BLEScanner:
         
         @self.app.route('/api/status')
         def get_status():
+            connected_proxies = sum(1 for status in self.proxy_connections.values() if status)
             return jsonify({
                 'running': self.running,
                 'device_count': len(self.devices),
                 'proxy_count': len(self.esp32_proxies),
+                'connected_proxies': connected_proxies,
                 'scan_interval': self.scan_interval,
-                'mqtt_connected': self.mqtt_connected
+                'mqtt_connected': self.mqtt_connected,
+                'proxy_connections': self.proxy_connections
             })
         
         @self.app.route('/api/config', methods=['GET'])
@@ -259,12 +264,25 @@ class BLEScanner:
     
     async def connect_esp32_proxy(self, proxy):
         """Connect to ESP32 BLE proxy with detailed logging"""
-        uri = f"ws://{proxy['host']}:{proxy['port']}"
-        logger.info(f"[BLEPROXY] Attempting connection to {uri}")
+        # Try WebSocket connection first (ESPHome API)
+        ws_uri = f"ws://{proxy['host']}:{proxy['port']}"
+        logger.info(f"[BLEPROXY] Attempting WebSocket connection to {ws_uri}")
         start_time = time.time()
+        
         try:
-            async with websockets.connect(uri) as websocket:
+            async with websockets.connect(ws_uri, ping_interval=30, ping_timeout=10) as websocket:
+                proxy_key = f"{proxy['host']}:{proxy['port']}"
+                self.proxy_connections[proxy_key] = True
                 logger.info(f"[BLEPROXY] Connected to {proxy['host']}:{proxy['port']} after {time.time() - start_time:.2f}s")
+                
+                # Send ESPHome API authentication (if needed)
+                auth_msg = {
+                    "type": "auth",
+                    "api_password": ""  # Empty for no password
+                }
+                await websocket.send(json.dumps(auth_msg))
+                logger.info(f"[BLEPROXY] Sent authentication to {proxy['host']}:{proxy['port']}")
+                
                 # Subscribe to BLE advertisements
                 subscribe_msg = {
                     "id": 1,
@@ -272,17 +290,62 @@ class BLEScanner:
                 }
                 await websocket.send(json.dumps(subscribe_msg))
                 logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {proxy['host']}:{proxy['port']}")
+                
                 # Listen for BLE advertisements
                 async for message in websocket:
                     try:
                         data = json.loads(message)
+                        logger.debug(f"[BLEPROXY] Received message from {proxy['host']}:{proxy['port']}: {data}")
                         await self.process_ble_advertisement(data, f"{proxy['host']}:{proxy['port']}")
                     except json.JSONDecodeError:
                         logger.warning(f"[BLEPROXY] Invalid JSON from proxy {proxy['host']}:{proxy['port']}: {message}")
                     except Exception as e:
                         logger.error(f"[BLEPROXY] Error processing message from {proxy['host']}:{proxy['port']}: {e}")
+                        
+        except websockets.exceptions.ConnectionClosed:
+            proxy_key = f"{proxy['host']}:{proxy['port']}"
+            self.proxy_connections[proxy_key] = False
+            logger.warning(f"[BLEPROXY] WebSocket connection closed to {proxy['host']}:{proxy['port']}")
+        except websockets.exceptions.InvalidURI:
+            proxy_key = f"{proxy['host']}:{proxy['port']}"
+            self.proxy_connections[proxy_key] = False
+            logger.error(f"[BLEPROXY] Invalid WebSocket URI: {ws_uri}")
         except Exception as e:
+            proxy_key = f"{proxy['host']}:{proxy['port']}"
+            self.proxy_connections[proxy_key] = False
             logger.error(f"[BLEPROXY] Error connecting to {proxy['host']}:{proxy['port']}: {e}")
+            # Try HTTP API as fallback
+            await self.try_http_api(proxy)
+
+    async def try_http_api(self, proxy):
+        """Try HTTP API as fallback for ESP32 proxy"""
+        http_url = f"http://{proxy['host']}:{proxy['port']}/api"
+        logger.info(f"[BLEPROXY] Trying HTTP API fallback: {http_url}")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Get ESP32 info
+                async with session.get(f"{http_url}/info") as response:
+                    if response.status == 200:
+                        info = await response.json()
+                        logger.info(f"[BLEPROXY] ESP32 Info: {info}")
+                    else:
+                        logger.warning(f"[BLEPROXY] HTTP API info failed: {response.status}")
+                        
+                # Try to get BLE devices via HTTP
+                async with session.get(f"{http_url}/ble_devices") as response:
+                    if response.status == 200:
+                        devices = await response.json()
+                        logger.info(f"[BLEPROXY] Found {len(devices)} devices via HTTP API")
+                        for device in devices:
+                            await self.process_ble_advertisement({
+                                'bluetooth_le_advertisement': device
+                            }, f"{proxy['host']}:{proxy['port']} (HTTP)")
+                    else:
+                        logger.warning(f"[BLEPROXY] HTTP API BLE devices failed: {response.status}")
+                        
+        except Exception as e:
+            logger.error(f"[BLEPROXY] HTTP API fallback failed: {e}")
     
     async def process_ble_advertisement(self, data, proxy_name):
         """Process BLE advertisement data and publish to MQTT if enabled"""
@@ -347,12 +410,24 @@ class BLEScanner:
                     logger.info(f"[SCAN] Scheduling connection to proxy {proxy['host']}:{proxy['port']}")
                     task = asyncio.create_task(self.connect_esp32_proxy(proxy))
                     tasks.append(task)
+                
                 if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                await asyncio.sleep(self.scan_interval)
+                    # Wait for all proxy connections with timeout
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*tasks, return_exceptions=True),
+                            timeout=self.scan_interval
+                        )
+                    except asyncio.TimeoutError:
+                        logger.info(f"[SCAN] Scan cycle completed after {self.scan_interval}s timeout")
+                else:
+                    logger.warning("[SCAN] No ESP32 proxies configured")
+                    await asyncio.sleep(5)
+                    
             except Exception as e:
                 logger.error(f"[SCAN] Error in scan loop: {e}")
                 await asyncio.sleep(5)
+                
         logger.info("[SCAN] BLE scan loop stopped")
 
     def _run_scan_loop(self):

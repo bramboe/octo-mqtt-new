@@ -19,6 +19,7 @@ from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 import paho.mqtt.client as mqtt
 import threading
+import requests
 
 # Configure logging
 logging.basicConfig(
@@ -27,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.8"
+ADDON_VERSION = "1.0.9"
 
 class BLEScanner:
     def __init__(self):
@@ -226,10 +227,21 @@ class BLEScanner:
     
     def setup_mqtt(self):
         """Setup MQTT client and connect"""
-        if not self.mqtt_host or self.mqtt_host == '<auto_detect>':
-            logger.info("[MQTT] MQTT host not set, MQTT will be disabled.")
+        # Handle auto-detection for MQTT host
+        if self.mqtt_host == '<auto_detect>' or not self.mqtt_host:
+            logger.info("[MQTT] Auto-detecting MQTT broker...")
+            self.mqtt_host = self.auto_detect_mqtt_host()
+            
+        if not self.mqtt_host:
+            logger.info("[MQTT] Could not auto-detect MQTT broker, MQTT will be disabled.")
             self.mqtt_client = None
             return
+            
+        # Handle auto-detection for MQTT credentials
+        if self.mqtt_user == '<auto_detect>' or not self.mqtt_user:
+            logger.info("[MQTT] Auto-detecting MQTT credentials...")
+            self.mqtt_user, self.mqtt_password = self.auto_detect_mqtt_credentials()
+            
         self.mqtt_client = mqtt.Client(client_id=f"ble_scanner_{int(time.time())}")
         if self.mqtt_user and self.mqtt_user != '<auto_detect>':
             self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
@@ -242,6 +254,81 @@ class BLEScanner:
         except Exception as e:
             logger.error(f"[MQTT] MQTT connection failed: {e}")
             self.mqtt_client = None
+    
+    def auto_detect_mqtt_host(self):
+        """Auto-detect MQTT broker host from Home Assistant supervisor"""
+        try:
+            # Try to get MQTT info from supervisor API
+            supervisor_url = os.environ.get('SUPERVISOR_URL', 'http://supervisor')
+            token = os.environ.get('SUPERVISOR_TOKEN')
+            
+            if not token:
+                logger.warning("[MQTT] No supervisor token available for auto-detection")
+                return None
+                
+            import requests
+            headers = {'Authorization': f'Bearer {token}'}
+            
+            # Get addon info to find MQTT addon
+            response = requests.get(f"{supervisor_url}/addons", headers=headers, timeout=10)
+            if response.status_code == 200:
+                addons = response.json()['data']['addons']
+                mqtt_addon = None
+                
+                # Look for MQTT addon
+                for addon in addons:
+                    if addon['slug'] in ['core_mosquitto', 'mosquitto', 'mqtt']:
+                        mqtt_addon = addon
+                        break
+                
+                if mqtt_addon and mqtt_addon['state'] == 'started':
+                    logger.info(f"[MQTT] Found MQTT addon: {mqtt_addon['name']}")
+                    # Get addon info for network details
+                    addon_info = requests.get(f"{supervisor_url}/addons/{mqtt_addon['slug']}/info", headers=headers, timeout=10)
+                    if addon_info.status_code == 200:
+                        info = addon_info.json()['data']
+                        # Use the addon's hostname (usually the addon slug)
+                        host = f"{mqtt_addon['slug']}.local"
+                        logger.info(f"[MQTT] Auto-detected MQTT host: {host}")
+                        return host
+                        
+        except Exception as e:
+            logger.warning(f"[MQTT] Auto-detection failed: {e}")
+            
+        # Fallback to default Home Assistant MQTT host
+        logger.info("[MQTT] Using fallback MQTT host: core-mosquitto")
+        return "core-mosquitto"
+    
+    def auto_detect_mqtt_credentials(self):
+        """Auto-detect MQTT credentials from Home Assistant"""
+        try:
+            # Try to get credentials from supervisor API
+            supervisor_url = os.environ.get('SUPERVISOR_URL', 'http://supervisor')
+            token = os.environ.get('SUPERVISOR_TOKEN')
+            
+            if not token:
+                logger.warning("[MQTT] No supervisor token available for credential auto-detection")
+                return None, None
+                
+            import requests
+            headers = {'Authorization': f'Bearer {token}'}
+            
+            # Try to get MQTT addon configuration
+            response = requests.get(f"{supervisor_url}/addons/core-mosquitto/config", headers=headers, timeout=10)
+            if response.status_code == 200:
+                config = response.json()['data']
+                username = config.get('username')
+                password = config.get('password')
+                if username and password:
+                    logger.info("[MQTT] Auto-detected MQTT credentials")
+                    return username, password
+                    
+        except Exception as e:
+            logger.warning(f"[MQTT] Credential auto-detection failed: {e}")
+            
+        # Fallback: try common default credentials
+        logger.info("[MQTT] Using fallback MQTT credentials")
+        return None, None
     
     def on_mqtt_connect(self, client, userdata, flags, rc):
         if rc == 0:

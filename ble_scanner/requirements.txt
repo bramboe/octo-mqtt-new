@@ -4,7 +4,7 @@ websockets==11.0.3
 aiohttp==3.8.6
 asyncio-mqtt==0.16.1
 # bleak==0.21.1  # Removed, not needed for ESPHome API
-paho-mqtt==1.6.1
+mqtt==4.2.8
 requests==2.31.0
 python-dotenv==1.0.0
-aioesphomeapi==10.5.0 
+aioesphomeapi==1.0.0 

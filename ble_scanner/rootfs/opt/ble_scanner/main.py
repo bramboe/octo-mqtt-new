@@ -21,6 +21,8 @@ import paho.mqtt.client as mqtt
 import threading
 import requests
 from aioesphomeapi import APIClient, APIConnectionError
+from asyncio_mqtt import Client as MqttClient
+import asyncio_mqtt
 
 # Configure logging
 logging.basicConfig(
@@ -29,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.17"
+ADDON_VERSION = "1.0.18"
 
 class BLEScanner:
     def __init__(self):
@@ -39,7 +41,7 @@ class BLEScanner:
         self.devices = {}
         self.esp32_proxies = []
         self.scan_interval = 30
-        self.running = False
+        self.running = True
         self.scan_thread = None
         # MQTT config
         self.mqtt_host = None
@@ -61,6 +63,13 @@ class BLEScanner:
         
         # Setup routes
         self.setup_routes()
+        
+        # Start ESP32 proxy connections
+        self.start_esp32_proxies()
+        
+        # Start scan loop
+        self.scan_thread = threading.Thread(target=self.scan_loop, daemon=True)
+        self.scan_thread.start()
         
     def load_config(self):
         """Load configuration from Home Assistant addon options"""
@@ -273,245 +282,223 @@ class BLEScanner:
             logger.error(f"Error loading devices: {e}")
     
     def setup_mqtt(self):
-        """Setup MQTT client and connect"""
+        """Setup MQTT client using smartbed-mqtt approach"""
         # Handle auto-detection for MQTT host
         if self.mqtt_host == '<auto_detect>' or not self.mqtt_host:
             logger.info("[MQTT] Auto-detecting MQTT broker...")
             self.mqtt_host = self.auto_detect_mqtt_host()
-            
+        
         if not self.mqtt_host:
             logger.info("[MQTT] Could not auto-detect MQTT broker, MQTT will be disabled.")
             self.mqtt_client = None
             return
-            
+        
         # Handle auto-detection for MQTT credentials
         if self.mqtt_user == '<auto_detect>' or not self.mqtt_user:
             logger.info("[MQTT] Auto-detecting MQTT credentials...")
             self.mqtt_user, self.mqtt_password = self.auto_detect_mqtt_credentials()
-            
+        
         # Only create MQTT client if we have a host
         if not self.mqtt_host:
             logger.info("[MQTT] No MQTT host available, MQTT will be disabled.")
             self.mqtt_client = None
             return
-            
-        # Check if we have valid credentials after auto-detection
+        
+        # Check if we have credentials
         if self.mqtt_user is None and self.mqtt_password is None:
             logger.info("[MQTT] No valid credentials found, MQTT will be disabled.")
             self.mqtt_client = None
             return
-            
-        self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"ble_scanner_{int(time.time())}")
-        if self.mqtt_user and self.mqtt_user != '<auto_detect>':
-            self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
-        self.mqtt_client.on_connect = self.on_mqtt_connect
-        self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
+        
+        # Create MQTT client using asyncio-mqtt (smartbed-mqtt approach)
         try:
+            mqtt_config = {
+                'hostname': self.mqtt_host,
+                'port': self.mqtt_port,
+                'username': self.mqtt_user,
+                'password': self.mqtt_password,
+                'client_id': f"ble_scanner_{int(time.time())}"
+            }
+            
             logger.info(f"[MQTT] Connecting to MQTT broker at {self.mqtt_host}:{self.mqtt_port}...")
-            self.mqtt_client.connect(self.mqtt_host, self.mqtt_port, 60)
-            self.mqtt_client.loop_start()
+            self.mqtt_client = MqttClient(**mqtt_config)
+            
+            # Start MQTT connection in background
+            threading.Thread(target=self._run_mqtt_connect_loop, daemon=True).start()
+            
         except Exception as e:
-            logger.error(f"[MQTT] MQTT connection failed: {e}")
+            logger.error(f"[MQTT] Error setting up MQTT client: {e}")
             self.mqtt_client = None
-    
-    def auto_detect_mqtt_host(self):
-        """Auto-detect MQTT broker host from Home Assistant supervisor"""
+
+    def _run_mqtt_connect_loop(self):
+        """Run MQTT connection loop in background thread"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            # Try to get MQTT info from supervisor API
-            supervisor_url = os.environ.get('SUPERVISOR_URL', 'http://supervisor')
-            token = os.environ.get('SUPERVISOR_TOKEN')
-            
-            if not token:
-                logger.warning("[MQTT] No supervisor token available for auto-detection")
-                return None
-                
-            import requests
-            headers = {'Authorization': f'Bearer {token}'}
-            
-            # Get addon info to find MQTT addon
-            response = requests.get(f"{supervisor_url}/addons", headers=headers, timeout=10)
-            if response.status_code == 200:
-                addons = response.json()['data']['addons']
-                mqtt_addon = None
-                
-                # Look for MQTT addon
-                for addon in addons:
-                    if addon['slug'] in ['core_mosquitto', 'mosquitto', 'mqtt']:
-                        mqtt_addon = addon
-                        break
-                
-                if mqtt_addon and mqtt_addon['state'] == 'started':
-                    logger.info(f"[MQTT] Found MQTT addon: {mqtt_addon['name']}")
-                    # Get addon info for network details
-                    addon_info = requests.get(f"{supervisor_url}/addons/{mqtt_addon['slug']}/info", headers=headers, timeout=10)
-                    if addon_info.status_code == 200:
-                        info = addon_info.json()['data']
-                        # Use the addon's hostname (usually the addon slug)
-                        host = f"{mqtt_addon['slug']}.local"
-                        logger.info(f"[MQTT] Auto-detected MQTT host: {host}")
-                        return host
+            loop.run_until_complete(self.mqtt_connect_loop())
+        except Exception as e:
+            logger.error(f"[MQTT] Error in MQTT connection loop: {e}")
+        finally:
+            loop.close()
+
+    async def mqtt_connect_loop(self):
+        """MQTT connection loop using smartbed-mqtt approach"""
+        while self.running:
+            try:
+                async with self.mqtt_client as client:
+                    self.mqtt_connected = True
+                    logger.info("[MQTT] Connected to MQTT broker")
+                    
+                    # Keep connection alive
+                    while self.running:
+                        await asyncio.sleep(10)
                         
-        except Exception as e:
-            logger.warning(f"[MQTT] Auto-detection failed: {e}")
-            
-        # Fallback to default Home Assistant MQTT host
-        logger.info("[MQTT] Using fallback MQTT host: core-mosquitto")
-        return "core-mosquitto"
-    
-    def auto_detect_mqtt_credentials(self):
-        """Auto-detect MQTT credentials from Home Assistant"""
+            except Exception as e:
+                self.mqtt_connected = False
+                logger.error(f"[MQTT] Connection error: {e}")
+                await asyncio.sleep(10)  # Wait before retrying
+
+    def publish_mqtt(self, topic, message):
+        """Publish message to MQTT using smartbed-mqtt approach"""
+        if not self.mqtt_client or not self.mqtt_connected:
+            return
+        
         try:
-            # Try to get credentials from supervisor API
-            supervisor_url = os.environ.get('SUPERVISOR_URL', 'http://supervisor')
-            token = os.environ.get('SUPERVISOR_TOKEN')
+            if isinstance(message, dict):
+                message = json.dumps(message)
             
-            if not token:
-                logger.warning("[MQTT] No supervisor token available for credential auto-detection")
-                return None, None
-                
-            import requests
-            headers = {'Authorization': f'Bearer {token}'}
+            # Run async publish in background
+            asyncio.create_task(self._async_publish_mqtt(topic, message))
             
-            # Try to get MQTT addon configuration
-            response = requests.get(f"{supervisor_url}/addons/core-mosquitto/config", headers=headers, timeout=10)
-            if response.status_code == 200:
-                config = response.json()['data']
-                username = config.get('username')
-                password = config.get('password')
-                if username and password:
-                    logger.info("[MQTT] Auto-detected MQTT credentials from addon config")
-                    return username, password
-                    
-            # Try to get credentials from Home Assistant configuration
-            response = requests.get(f"{supervisor_url}/core/api/config", headers=headers, timeout=10)
-            if response.status_code == 200:
-                config = response.json()['data']
-                mqtt_config = config.get('mqtt', {})
-                username = mqtt_config.get('username')
-                password = mqtt_config.get('password')
-                if username and password:
-                    logger.info("[MQTT] Auto-detected MQTT credentials from HA config")
-                    return username, password
-                    
-            # Try to get credentials from secrets
-            response = requests.get(f"{supervisor_url}/core/api/config", headers=headers, timeout=10)
-            if response.status_code == 200:
-                config = response.json()['data']
-                secrets = config.get('secrets', {})
-                mqtt_username = secrets.get('mqtt_username')
-                mqtt_password = secrets.get('mqtt_password')
-                if mqtt_username and mqtt_password:
-                    logger.info("[MQTT] Auto-detected MQTT credentials from secrets")
-                    return mqtt_username, mqtt_password
-                    
         except Exception as e:
-            logger.warning(f"[MQTT] Credential auto-detection failed: {e}")
-            
+            logger.error(f"[MQTT] Error publishing to {topic}: {e}")
+
+    async def _async_publish_mqtt(self, topic, message):
+        """Async MQTT publish"""
+        try:
+            await self.mqtt_client.publish(topic, message, qos=1)
+            logger.debug(f"[MQTT] Published to {topic}: {message}")
+        except Exception as e:
+            logger.error(f"[MQTT] Error in async publish to {topic}: {e}")
+
+    def auto_detect_mqtt_host(self):
+        """Auto-detect MQTT broker host"""
+        # Try to detect Home Assistant MQTT add-on
+        try:
+            response = requests.get("http://supervisor/addons", timeout=5)
+            if response.status_code == 200:
+                addons = response.json()
+                for addon in addons.get('data', {}).get('addons', []):
+                    if addon.get('slug') == 'core-mosquitto':
+                        return 'core-mosquitto'
+        except Exception as e:
+            logger.debug(f"[MQTT] Auto-detection failed: {e}")
+        
+        # Fallback to common MQTT hosts
+        common_hosts = ['core-mosquitto', 'mosquitto', 'localhost', '192.168.1.1']
+        for host in common_hosts:
+            try:
+                # Try to connect to test if host is reachable
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                result = sock.connect_ex((host, 1883))
+                sock.close()
+                if result == 0:
+                    logger.info(f"[MQTT] Auto-detected MQTT host: {host}")
+                    return host
+            except Exception:
+                continue
+        
+        return None
+
+    def auto_detect_mqtt_credentials(self):
+        """Auto-detect MQTT credentials"""
+        # Try to get credentials from Home Assistant configuration
+        try:
+            response = requests.get("http://supervisor/addons/core-mosquitto/config", timeout=5)
+            if response.status_code == 200:
+                config = response.json()
+                return config.get('username'), config.get('password')
+        except Exception as e:
+            logger.debug(f"[MQTT] Credential auto-detection failed: {e}")
+        
+        # Try to get from Home Assistant core config
+        try:
+            response = requests.get("http://supervisor/core/api/config", timeout=5)
+            if response.status_code == 200:
+                config = response.json()
+                mqtt_config = config.get('mqtt', {})
+                return mqtt_config.get('username'), mqtt_config.get('password')
+        except Exception as e:
+            logger.debug(f"[MQTT] Core config auto-detection failed: {e}")
+        
         # Try common default credentials
-        logger.info("[MQTT] Trying common default MQTT credentials")
         common_credentials = [
-            ("homeassistant", "homeassistant"),
-            ("mqtt", "mqtt"),
-            ("admin", "admin"),
-            ("user", "password"),
-            ("", ""),  # No credentials
-            ("homeassistant", ""),  # Username only
-            ("", "homeassistant"),  # Password only
+            (None, None),  # No auth
+            ('homeassistant', 'homeassistant'),
+            ('admin', 'admin'),
+            ('mqtt', 'mqtt'),
         ]
         
         for username, password in common_credentials:
             try:
                 # Test connection with these credentials
-                test_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"test_{int(time.time())}")
-                if username:
-                    test_client.username_pw_set(username, password)
+                test_client = MqttClient(
+                    hostname=self.mqtt_host,
+                    port=self.mqtt_port,
+                    username=username,
+                    password=password,
+                    client_id=f"test_{int(time.time())}"
+                )
                 
-                # Set up connection callbacks for testing
-                connected = False
-                def on_connect_test(client, userdata, flags, reason_code, properties=None):
-                    nonlocal connected
-                    if reason_code == 0:
-                        connected = True
-                    else:
-                        connected = False
-                
-                test_client.on_connect = on_connect_test
-                test_client.connect("core-mosquitto", 1883, 5)
-                test_client.loop_start()
-                
-                # Wait a bit for connection
-                time.sleep(2)
-                test_client.loop_stop()
-                test_client.disconnect()
-                
-                if connected:
-                    logger.info(f"[MQTT] Found working credentials: {username}")
+                # Try to connect
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self.test_mqtt_credentials(test_client))
+                    logger.info(f"[MQTT] Auto-detected working credentials: {username}")
                     return username, password
-            except Exception:
-                continue
+                finally:
+                    loop.close()
                 
-        # Try connecting without credentials as last resort
-        try:
-            test_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"test_noauth_{int(time.time())}")
-            connected = False
-            def on_connect_test(client, userdata, flags, reason_code, properties=None):
-                nonlocal connected
-                if reason_code == 0:
-                    connected = True
-                else:
-                    connected = False
-            
-            test_client.on_connect = on_connect_test
-            test_client.connect("core-mosquitto", 1883, 5)
-            test_client.loop_start()
-            time.sleep(2)
-            test_client.loop_stop()
-            test_client.disconnect()
-            
-            if connected:
-                logger.info("[MQTT] Connection successful without credentials")
-                return None, None
-        except Exception as e:
-            logger.debug(f"[MQTT] No-auth test failed: {e}")
-            
-        logger.warning("[MQTT] No working credentials found, MQTT will be disabled")
+            except Exception as e:
+                logger.debug(f"[MQTT] Credential test failed for {username}: {e}")
+                continue
+        
         return None, None
-    
-    def on_mqtt_connect(self, client, userdata, flags, rc, properties=None):
-        # Convert ReasonCode to int for comparison
-        rc_int = rc.value if hasattr(rc, 'value') else int(rc)
-        
-        if rc_int == 0:
-            logger.info("[MQTT] Successfully connected to MQTT broker")
-            self.mqtt_connected = True
-        else:
-            error_codes = {
-                1: "Incorrect protocol version",
-                2: "Invalid client identifier", 
-                3: "Server unavailable",
-                4: "Bad username or password",
-                5: "Not authorized"
-            }
-            error_msg = error_codes.get(rc_int, f"Unknown error code {rc_int}")
-            logger.error(f"[MQTT] Failed to connect to MQTT broker: {error_msg} (code {rc_int})")
-            self.mqtt_connected = False
-    
-    def on_mqtt_disconnect(self, client, userdata, rc, properties=None):
-        # Convert ReasonCode to int for comparison
-        rc_int = rc.value if hasattr(rc, 'value') else int(rc)
-        
-        if rc_int == 0:
-            logger.info("[MQTT] Cleanly disconnected from MQTT broker")
-        else:
-            logger.warning(f"[MQTT] Unexpectedly disconnected from MQTT broker (code {rc_int})")
-        self.mqtt_connected = False
-    
+
+    async def test_mqtt_credentials(self, client):
+        """Test MQTT credentials"""
+        try:
+            async with client:
+                await asyncio.sleep(1)  # Brief connection test
+        except Exception:
+            raise
+
+    def start_esp32_proxies(self):
+        """Start ESP32 proxy connection tasks"""
+        for proxy in self.esp32_proxies:
+            threading.Thread(target=self._run_esp32_proxy, args=(proxy,), daemon=True).start()
+
+    def _run_esp32_proxy(self, proxy):
+        """Run ESP32 proxy connection in background thread"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.connect_esp32_proxy(proxy))
+        except Exception as e:
+            logger.error(f"[BLEPROXY] Error in ESP32 proxy thread: {e}")
+        finally:
+            loop.close()
+
     async def connect_esp32_proxy(self, proxy):
         """Robust ESPHome BLE proxy connection loop, smartbed-mqtt style."""
         host = proxy['host']
         port = proxy.get('port', 6053)
         password = proxy.get('password', '')
         proxy_key = f"{host}:{port}"
+        
         while self.running:
             client = APIClient(host, port, password=password)
             try:
@@ -532,12 +519,15 @@ class BLEScanner:
 
                 await client.subscribe_bluetooth_le_advertisements(handle_ble_advertisement)
                 logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {host}:{port}")
+                
                 # Keep the connection open while running
                 while self.running:
                     await asyncio.sleep(10)
+                    
                 await client.disconnect()
                 self.proxy_connections[proxy_key] = False
                 logger.info(f"[BLEPROXY] Disconnected from ESPHome BLE proxy at {host}:{port}")
+                
             except APIConnectionError as e:
                 self.proxy_connections[proxy_key] = False
                 logger.error(f"[BLEPROXY] ESPHome API connection error: {e}")
@@ -546,6 +536,96 @@ class BLEScanner:
                 self.proxy_connections[proxy_key] = False
                 logger.error(f"[BLEPROXY] Error connecting to ESPHome BLE proxy at {host}:{port}: {e}")
                 await asyncio.sleep(10)  # Wait before retrying
+
+    async def process_ble_advertisement(self, data, proxy_key):
+        """Process BLE advertisement data"""
+        try:
+            adv = data.get('bluetooth_le_advertisement', {})
+            address = adv.get('address')
+            name = adv.get('name', 'Unknown Device')
+            rssi = adv.get('rssi', 0)
+            
+            if not address:
+                return
+            
+            # Update device data
+            device_key = address.lower()
+            if device_key not in self.devices:
+                self.devices[device_key] = {
+                    'address': address,
+                    'name': name,
+                    'first_seen': datetime.now().isoformat(),
+                    'last_seen': datetime.now().isoformat(),
+                    'rssi': rssi,
+                    'proxy': proxy_key,
+                    'manufacturer_data': adv.get('manufacturer_data', {}),
+                    'service_uuids': adv.get('service_uuids', []),
+                    'seen_count': 1
+                }
+            else:
+                self.devices[device_key].update({
+                    'last_seen': datetime.now().isoformat(),
+                    'rssi': rssi,
+                    'proxy': proxy_key,
+                    'manufacturer_data': adv.get('manufacturer_data', {}),
+                    'service_uuids': adv.get('service_uuids', []),
+                    'seen_count': self.devices[device_key].get('seen_count', 0) + 1
+                })
+            
+            # Publish to MQTT if enabled
+            if self.mqtt_connected and self.mqtt_discovery_enabled:
+                self.publish_mqtt(f"{self.mqtt_topic}/{device_key}", self.devices[device_key])
+            
+            logger.debug(f"[BLE] Processed advertisement from {name} ({address}) via {proxy_key}")
+            
+        except Exception as e:
+            logger.error(f"[BLE] Error processing advertisement: {e}")
+
+    def scan_loop(self):
+        """Main scan loop - runs in background thread"""
+        while self.running:
+            try:
+                if self.running:
+                    # Scan logic is handled by ESP32 proxies
+                    pass
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"[SCAN] Error in scan loop: {e}")
+                time.sleep(5)
+
+    def get_status(self):
+        """Get current status"""
+        return {
+            'version': ADDON_VERSION,
+            'running': self.running,
+            'device_count': len(self.devices),
+            'proxy_connections': self.proxy_connections,
+            'mqtt_connected': self.mqtt_connected,
+            'mqtt_discovery_enabled': self.mqtt_discovery_enabled,
+            'proxy_count': len(self.esp32_proxies)
+        }
+
+    def get_devices(self):
+        """Get all discovered devices"""
+        return self.devices
+
+    def start_scan(self):
+        """Start BLE scanning"""
+        self.running = True
+        logger.info("[SCAN] BLE scanning started")
+        return {"status": "started"}
+
+    def stop_scan(self):
+        """Stop BLE scanning"""
+        self.running = False
+        logger.info("[SCAN] BLE scanning stopped")
+        return {"status": "stopped"}
+
+    def clear_devices(self):
+        """Clear all discovered devices"""
+        self.devices.clear()
+        logger.info("[SCAN] All devices cleared")
+        return {"status": "cleared"}
 
     async def test_websocket_connection(self, proxy):
         """Test WebSocket connection to ESP32 proxy"""
@@ -602,175 +682,6 @@ class BLEScanner:
                         
         except Exception as e:
             logger.error(f"[BLEPROXY] HTTP API fallback failed: {e}")
-    
-    async def process_ble_advertisement(self, data, proxy_name):
-        """Process BLE advertisement data and publish to MQTT if enabled"""
-        try:
-            if 'bluetooth_le_advertisement' in data:
-                adv = data['bluetooth_le_advertisement']
-                mac_address = adv.get('address', '').upper()
-                
-                if not mac_address:
-                    return
-                
-                device = {
-                    'mac_address': mac_address,
-                    'name': adv.get('name', 'Unknown Device'),
-                    'rssi': adv.get('rssi', 0),
-                    'last_seen': datetime.now().isoformat(),
-                    'manufacturer': adv.get('manufacturer_data', {}),
-                    'services': adv.get('service_uuids', []),
-                    'proxy': proxy_name,
-                    'added_manually': False
-                }
-                
-                # Update existing device or add new one
-                if mac_address in self.devices:
-                    # Update last seen and RSSI
-                    self.devices[mac_address].update({
-                        'last_seen': device['last_seen'],
-                        'rssi': device['rssi'],
-                        'proxy': device['proxy']
-                    })
-                else:
-                    self.devices[mac_address] = device
-                    logger.info(f"New device discovered: {mac_address} ({device['name']})")
-                
-                # Publish to MQTT
-                self.publish_mqtt_device(device)
-        except Exception as e:
-            logger.error(f"Error processing BLE advertisement: {e}")
-    
-    def publish_mqtt_device(self, device):
-        """Publish a device dict to MQTT as JSON"""
-        if self.mqtt_client and self.mqtt_connected:
-            try:
-                if self.mqtt_discovery_enabled:
-                    # Publish Home Assistant MQTT device discovery messages
-                    self.publish_mqtt_discovery(device)
-                else:
-                    # Publish simple JSON data
-                    payload = json.dumps(device)
-                    result = self.mqtt_client.publish(self.mqtt_topic, payload, qos=0, retain=False)
-                    if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                        logger.debug(f"[MQTT] Published device {device['mac_address']} to {self.mqtt_topic}")
-                    else:
-                        logger.error(f"[MQTT] Failed to publish device {device['mac_address']}: error code {result.rc}")
-            except Exception as e:
-                logger.error(f"[MQTT] Exception publishing device {device['mac_address']}: {e}")
-        else:
-            logger.debug(f"[MQTT] Skipping publish for {device['mac_address']} - MQTT not connected")
-    
-    def publish_mqtt_discovery(self, device):
-        """Publish Home Assistant MQTT device discovery messages"""
-        try:
-            mac_address = device['mac_address']
-            device_id = mac_address.replace(':', '').lower()
-            device_name = device['name'] or f"BLE Device {mac_address}"
-            
-            # Device configuration
-            device_config = {
-                "identifiers": [f"ble_scanner_{device_id}"],
-                "name": device_name,
-                "manufacturer": "BLE Scanner",
-                "model": "BLE Device",
-                "via_device": "ble_scanner_addon"
-            }
-            
-            # Sensor for RSSI
-            rssi_config = {
-                "device": device_config,
-                "name": f"{device_name} RSSI",
-                "state_topic": f"ble_scanner/{device_id}/rssi",
-                "unit_of_measurement": "dBm",
-                "device_class": "signal_strength",
-                "unique_id": f"ble_scanner_{device_id}_rssi"
-            }
-            
-            # Sensor for last seen
-            last_seen_config = {
-                "device": device_config,
-                "name": f"{device_name} Last Seen",
-                "state_topic": f"ble_scanner/{device_id}/last_seen",
-                "device_class": "timestamp",
-                "unique_id": f"ble_scanner_{device_id}_last_seen"
-            }
-            
-            # Binary sensor for presence
-            presence_config = {
-                "device": device_config,
-                "name": f"{device_name} Presence",
-                "state_topic": f"ble_scanner/{device_id}/presence",
-                "device_class": "presence",
-                "unique_id": f"ble_scanner_{device_id}_presence"
-            }
-            
-            # Publish device discovery messages
-            discovery_topic_base = "homeassistant"
-            
-            # Publish RSSI sensor
-            rssi_topic = f"{discovery_topic_base}/sensor/ble_scanner_{device_id}_rssi/config"
-            self.mqtt_client.publish(rssi_topic, json.dumps(rssi_config), qos=1, retain=True)
-            
-            # Publish last seen sensor
-            last_seen_topic = f"{discovery_topic_base}/sensor/ble_scanner_{device_id}_last_seen/config"
-            self.mqtt_client.publish(last_seen_topic, json.dumps(last_seen_config), qos=1, retain=True)
-            
-            # Publish presence sensor
-            presence_topic = f"{discovery_topic_base}/binary_sensor/ble_scanner_{device_id}_presence/config"
-            self.mqtt_client.publish(presence_topic, json.dumps(presence_config), qos=1, retain=True)
-            
-            # Publish current values
-            self.mqtt_client.publish(f"ble_scanner/{device_id}/rssi", str(device['rssi']), qos=0, retain=False)
-            self.mqtt_client.publish(f"ble_scanner/{device_id}/last_seen", device['last_seen'], qos=0, retain=False)
-            self.mqtt_client.publish(f"ble_scanner/{device_id}/presence", "ON", qos=0, retain=False)
-            
-            logger.debug(f"[MQTT] Published discovery messages for device {mac_address}")
-            
-        except Exception as e:
-            logger.error(f"[MQTT] Exception publishing discovery for device {device['mac_address']}: {e}")
-    
-    async def scan_loop(self):
-        logger.info("[SCAN] Starting BLE scan loop")
-        while self.running:
-            try:
-                logger.info(f"[SCAN] Connecting to {len(self.esp32_proxies)} proxies...")
-                tasks = []
-                for proxy in self.esp32_proxies:
-                    logger.info(f"[SCAN] Scheduling connection to proxy {proxy['host']}:{proxy['port']}")
-                    task = asyncio.create_task(self.connect_esp32_proxy(proxy))
-                    tasks.append(task)
-                
-                if tasks:
-                    # Wait for all proxy connections with timeout
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.gather(*tasks, return_exceptions=True),
-                            timeout=self.scan_interval
-                        )
-                    except asyncio.TimeoutError:
-                        logger.info(f"[SCAN] Scan cycle completed after {self.scan_interval}s timeout")
-                else:
-                    logger.warning("[SCAN] No ESP32 proxies configured")
-                    await asyncio.sleep(5)
-                    
-            except Exception as e:
-                logger.error(f"[SCAN] Error in scan loop: {e}")
-                await asyncio.sleep(5)
-                
-        logger.info("[SCAN] BLE scan loop stopped")
-
-    def _run_scan_loop(self):
-        """Run the scan loop in a separate thread"""
-        logger.info("[SCAN] Starting scan thread")
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.scan_loop())
-        except Exception as e:
-            logger.error(f"[SCAN] Exception in scan thread: {e}")
-        finally:
-            logger.info("[SCAN] Scan thread exited")
     
     def run(self):
         """Start the Flask application"""

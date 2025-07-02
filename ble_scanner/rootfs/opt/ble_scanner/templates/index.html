@@ -8,21 +8,85 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         body {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--ha-background, linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%));
             min-height: 100vh;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         .main-container {
-            background: rgba(255, 255, 255, 0.95);
+            background: rgba(255, 255, 255, 0.98);
             border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
             margin: 20px;
             padding: 30px;
         }
         .header {
             text-align: center;
-            margin-bottom: 30px;
-            color: #333;
+            margin-bottom: 20px;
+            color: #212121;
+        }
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #03a9f4;
+            color: white;
+            border-radius: 8px;
+            padding: 10px 20px;
+            margin-bottom: 18px;
+            font-size: 1em;
+        }
+        .status-bar .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status-bar .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 6px;
+        }
+        .status-dot.ok { background: #4caf50; }
+        .status-dot.warn { background: #ffc107; }
+        .status-dot.err { background: #f44336; }
+        .status-bar .repo-link {
+            color: #fff;
+            text-decoration: underline;
+            margin-left: 10px;
+        }
+        .help-section {
+            background: #f1f8e9;
+            border-left: 4px solid #4caf50;
+            border-radius: 8px;
+            padding: 18px 20px;
+            margin-bottom: 22px;
+        }
+        .help-section h5 {
+            color: #388e3c;
+            margin-bottom: 8px;
+        }
+        .copy-btn {
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-left: 8px;
+        }
+        .device-card {
+            position: relative;
+        }
+        .device-card .copy-btn {
+            position: absolute;
+            top: 10px;
+            right: 50px;
+        }
+        .device-card .repo-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+        }
+        @media (max-width: 600px) {
+            .main-container { padding: 10px; }
+            .status-bar { flex-direction: column; gap: 8px; }
         }
         .status-card {
             background: linear-gradient(45deg, #4CAF50, #45a049);
@@ -98,7 +162,20 @@
         <div class="main-container">
             <div class="header">
                 <h1><i class="fas fa-bluetooth-b"></i> BLE Scanner</h1>
-                <p class="text-muted">Home Assistant Addon - Bluetooth Low Energy Device Discovery</p>
+                <p class="text-muted">Home Assistant Add-on - Bluetooth Low Energy Device Discovery</p>
+            </div>
+            <!-- Home Assistant style status bar -->
+            <div class="status-bar">
+                <div class="status-item"><span class="status-dot ok" id="addonStatusDot"></span> Add-on v<span id="addonVersion">1.0.0</span></div>
+                <div class="status-item"><span class="status-dot warn" id="mqttStatusDot"></span> MQTT: <span id="mqttStatus">Unknown</span></div>
+                <div class="status-item"><span class="status-dot ok" id="proxyStatusDot"></span> Proxies: <span id="proxyCountBar">0</span></div>
+                <div class="status-item"><a class="repo-link" href="https://github.com/bramboe/octo-mqtt-new" target="_blank"><i class="fab fa-github"></i> Repository</a></div>
+            </div>
+            <!-- Help/About section -->
+            <div class="help-section">
+                <h5><i class="fas fa-info-circle"></i> About this Add-on</h5>
+                <p>This add-on scans for Bluetooth Low Energy (BLE) devices using ESP32 BLE proxies and publishes results to MQTT. View, manage, and export device data. <br>
+                <b>Docs:</b> <a href="https://github.com/bramboe/octo-mqtt-new" target="_blank">octo-mqtt-new on GitHub</a></p>
             </div>
 
             <!-- Status Card -->
@@ -199,6 +276,11 @@
                     const response = await fetch('/api/status');
                     this.status = await response.json();
                     this.updateStatusDisplay();
+                    // Update status bar
+                    document.getElementById('proxyCountBar').textContent = this.status.proxy_count || 0;
+                    // Simulate MQTT status (replace with real status if available)
+                    document.getElementById('mqttStatus').textContent = (this.status.mqtt_connected !== undefined ? (this.status.mqtt_connected ? 'Connected' : 'Disconnected') : 'Unknown');
+                    document.getElementById('mqttStatusDot').className = 'status-dot ' + (this.status.mqtt_connected ? 'ok' : 'err');
                 } catch (error) {
                     console.error('Error loading status:', error);
                 }
@@ -327,43 +409,58 @@
             renderDeviceCard(device) {
                 const rssiClass = this.getRssiClass(device.rssi);
                 const lastSeen = new Date(device.last_seen).toLocaleString();
-                const proxyBadge = device.proxy ? `<span class="proxy-badge">${device.proxy}</span>` : '';
-                const manualBadge = device.added_manually ? '<span class="badge bg-warning ms-2">Manual</span>' : '';
-
+                const proxyBadge = device.proxy ? `<span class=\"proxy-badge\">${device.proxy}</span>` : '';
+                const manualBadge = device.added_manually ? '<span class=\"badge bg-warning ms-2\">Manual</span>' : '';
+                const deviceJson = JSON.stringify(device, null, 2);
+                const mac = device.mac_address;
                 return `
-                    <div class="device-card">
-                        <div class="row align-items-center">
-                            <div class="col-md-3">
-                                <h6 class="mb-1">
-                                    <span class="rssi-indicator ${rssiClass}"></span>
+                    <div class=\"device-card\">
+                        <div class=\"row align-items-center\">
+                            <div class=\"col-md-3\">
+                                <h6 class=\"mb-1\">
+                                    <span class=\"rssi-indicator ${rssiClass}\"></span>
                                     ${device.name}
                                     ${manualBadge}
                                 </h6>
-                                <div class="mac-address">${device.mac_address}</div>
+                                <div class=\"mac-address\">${device.mac_address}</div>
                             </div>
-                            <div class="col-md-2">
+                            <div class=\"col-md-2\">
                                 <strong>RSSI:</strong> ${device.rssi} dBm
                             </div>
-                            <div class="col-md-2">
+                            <div class=\"col-md-2\">
                                 <strong>Manufacturer:</strong> ${device.manufacturer || 'Unknown'}
                             </div>
-                            <div class="col-md-2">
+                            <div class=\"col-md-2\">
                                 <strong>Services:</strong> ${device.services ? device.services.length : 0}
                             </div>
-                            <div class="col-md-2">
+                            <div class=\"col-md-2\">
                                 <strong>Proxy:</strong> ${proxyBadge}
                             </div>
-                            <div class="col-md-1">
-                                <button class="btn btn-sm btn-outline-danger" onclick="scanner.removeDevice('${device.mac_address}')">
-                                    <i class="fas fa-trash"></i>
+                            <div class=\"col-md-1 d-flex flex-row\">
+                                <button class=\"btn btn-sm btn-outline-secondary copy-btn\" title=\"Copy MQTT JSON\" onclick='scanner.copyDeviceJson("${mac}")'>
+                                    <i class=\"fas fa-copy\"></i>
+                                </button>
+                                <a class=\"btn btn-sm btn-outline-dark repo-btn\" href=\"https://github.com/bramboe/octo-mqtt-new\" target=\"_blank\" title=\"View on GitHub\">
+                                    <i class=\"fab fa-github\"></i>
+                                </a>
+                                <button class=\"btn btn-sm btn-outline-danger ms-1\" onclick=\"scanner.removeDevice('${device.mac_address}')\">
+                                    <i class=\"fas fa-trash\"></i>
                                 </button>
                             </div>
                         </div>
-                        <div class="last-seen mt-2">
-                            <i class="fas fa-clock"></i> Last seen: ${lastSeen}
+                        <div class=\"last-seen mt-2\">
+                            <i class=\"fas fa-clock\"></i> Last seen: ${lastSeen}
                         </div>
                     </div>
                 `;
+            }
+
+            copyDeviceJson(mac) {
+                const device = this.devices.find(d => d.mac_address === mac);
+                if (device) {
+                    navigator.clipboard.writeText(JSON.stringify(device, null, 2));
+                    this.showNotification("Copied!", "success");
+                }
             }
 
             getRssiClass(rssi) {

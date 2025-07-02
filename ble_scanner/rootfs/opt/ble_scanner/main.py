@@ -27,8 +27,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+ADDON_VERSION = "1.0.1"
+
 class BLEScanner:
     def __init__(self):
+        logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} initializing...")
         self.app = Flask(__name__)
         CORS(self.app)
         self.devices = {}
@@ -135,6 +138,8 @@ class BLEScanner:
                         loop.run_until_complete(self.scan_loop())
                     except Exception as e:
                         logger.error(f"[SCAN] Exception in scan thread: {e}")
+                    finally:
+                        logger.error("[SCAN] Scan thread exited unexpectedly!")
                 self.scan_thread = threading.Thread(target=scan_thread, daemon=True)
                 self.scan_thread.start()
                 return jsonify({'message': 'Scan started'})
@@ -144,6 +149,7 @@ class BLEScanner:
         
         @self.app.route('/api/scan/stop', methods=['POST'])
         def stop_scan():
+            logger.info("[SCAN] /api/scan/stop called")
             if not self.running:
                 logger.info("[SCAN] Scan already stopped.")
                 return jsonify({'message': 'Scan already stopped'})

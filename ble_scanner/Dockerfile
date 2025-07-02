@@ -18,18 +18,11 @@ RUN \
         gcc \
     \
     && pip3 install --no-cache-dir --upgrade pip \
-    && pip3 install --no-cache-dir \
-        flask \
-        flask-cors \
-        websockets \
-        asyncio-mqtt \
-        bleak \
-        paho-mqtt \
-        requests \
-        python-dotenv \
-        aiohttp \
-    \
     && rm -rf /var/cache/apk/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt /
+RUN pip3 install --no-cache-dir -r /requirements.txt
 
 # Copy root filesystem
 COPY rootfs /

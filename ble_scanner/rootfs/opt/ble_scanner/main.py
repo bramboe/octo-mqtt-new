@@ -35,6 +35,7 @@ class BLEScanner:
         self.esp32_proxies = []
         self.scan_interval = 30
         self.running = False
+        self.scan_thread = None
         # MQTT config
         self.mqtt_host = None
         self.mqtt_port = 1883
@@ -120,14 +121,25 @@ class BLEScanner:
         
         @self.app.route('/api/scan/start', methods=['POST'])
         def start_scan():
-            if not self.running:
-                self.running = True
-                asyncio.create_task(self.scan_loop())
-                return jsonify({'message': 'Scan started'})
-            return jsonify({'message': 'Scan already running'})
+            if self.running:
+                logger.info("[SCAN] Scan already running.")
+                return jsonify({'message': 'Scan already running'})
+            logger.info("[SCAN] Starting BLE scan loop (user request)")
+            self.running = True
+            def scan_thread():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.scan_loop())
+            self.scan_thread = threading.Thread(target=scan_thread, daemon=True)
+            self.scan_thread.start()
+            return jsonify({'message': 'Scan started'})
         
         @self.app.route('/api/scan/stop', methods=['POST'])
         def stop_scan():
+            if not self.running:
+                logger.info("[SCAN] Scan already stopped.")
+                return jsonify({'message': 'Scan already stopped'})
+            logger.info("[SCAN] Stopping BLE scan loop (user request)")
             self.running = False
             return jsonify({'message': 'Scan stopped'})
         
@@ -265,40 +277,28 @@ class BLEScanner:
                 logger.error(f"Failed to publish to MQTT: {e}")
     
     async def scan_loop(self):
-        """Main scanning loop"""
-        logger.info("Starting BLE scan loop")
-        
+        logger.info("[SCAN] Starting BLE scan loop")
         while self.running:
             try:
-                # Connect to all ESP32 proxies
+                logger.info(f"[SCAN] Connecting to {len(self.esp32_proxies)} proxies...")
                 tasks = []
                 for proxy in self.esp32_proxies:
+                    logger.info(f"[SCAN] Scheduling connection to proxy {proxy['host']}:{proxy['port']}")
                     task = asyncio.create_task(self.connect_esp32_proxy(proxy))
                     tasks.append(task)
-                
-                # Wait for all connections to complete or fail
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Wait before retrying
                 await asyncio.sleep(self.scan_interval)
-                
             except Exception as e:
-                logger.error(f"Error in scan loop: {e}")
+                logger.error(f"[SCAN] Error in scan loop: {e}")
                 await asyncio.sleep(5)
-        
-        logger.info("BLE scan loop stopped")
+        logger.info("[SCAN] BLE scan loop stopped")
     
     def run(self):
         """Start the Flask application"""
         # Load previously discovered devices
         self.load_devices()
-        # Start scanning in a background thread with its own event loop
-        def scan_thread():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.scan_loop())
-        threading.Thread(target=scan_thread, daemon=True).start()
+        # Do not start scan loop here; only start on user request
         # Run Flask app
         self.app.run(host='0.0.0.0', port=8099, debug=False)
         # Cleanup MQTT

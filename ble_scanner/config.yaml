@@ -22,8 +22,7 @@ panel_icon: mdi:bluetooth
 homeassistant_api: false
 options:
   esp32_proxies:
-    - name: "ESP32 Proxy 1"
-      host: "192.168.1.100"
+    - host: "192.168.1.100"
       port: 6053
   scan_interval: 30
   log_level: info
@@ -34,8 +33,7 @@ options:
   mqtt_topic: "ble_scanner/devices"
 schema:
   esp32_proxies:
-    - name: str
-      host: str
+    - host: str
       port: int
   scan_interval: int
   log_level: str

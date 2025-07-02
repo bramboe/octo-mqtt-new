@@ -60,22 +60,18 @@ class BLEScanner:
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                    
                 self.esp32_proxies = config.get('esp32_proxies', [])
                 self.scan_interval = config.get('scan_interval', 30)
                 log_level = config.get('log_level', 'info')
-                
                 # MQTT
                 self.mqtt_host = config.get('mqtt_host', None)
                 self.mqtt_port = config.get('mqtt_port', 1883)
                 self.mqtt_user = config.get('mqtt_user', None)
                 self.mqtt_password = config.get('mqtt_password', None)
                 self.mqtt_topic = config.get('mqtt_topic', 'ble_scanner/devices')
-                
                 # Set log level
                 if log_level == 'debug':
                     logging.getLogger().setLevel(logging.DEBUG)
-                    
                 logger.info(f"Loaded configuration: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}")
             else:
                 logger.warning("No configuration file found, using defaults")
@@ -198,29 +194,25 @@ class BLEScanner:
         try:
             uri = f"ws://{proxy['host']}:{proxy['port']}"
             logger.info(f"Connecting to ESP32 proxy: {uri}")
-            
             async with websockets.connect(uri) as websocket:
-                logger.info(f"Connected to ESP32 proxy: {proxy['name']}")
-                
+                logger.info(f"Connected to ESP32 proxy: {proxy['host']}:{proxy['port']}")
                 # Subscribe to BLE advertisements
                 subscribe_msg = {
                     "id": 1,
                     "type": "subscribe_bluetooth_le_advertisements"
                 }
                 await websocket.send(json.dumps(subscribe_msg))
-                
                 # Listen for BLE advertisements
                 async for message in websocket:
                     try:
                         data = json.loads(message)
-                        await self.process_ble_advertisement(data, proxy['name'])
+                        await self.process_ble_advertisement(data, f"{proxy['host']}:{proxy['port']}")
                     except json.JSONDecodeError:
                         logger.warning(f"Invalid JSON from proxy: {message}")
                     except Exception as e:
                         logger.error(f"Error processing message: {e}")
-                        
         except Exception as e:
-            logger.error(f"Error connecting to ESP32 proxy {proxy['name']}: {e}")
+            logger.error(f"Error connecting to ESP32 proxy {proxy['host']}:{proxy['port']}: {e}")
     
     async def process_ble_advertisement(self, data, proxy_name):
         """Process BLE advertisement data and publish to MQTT if enabled"""

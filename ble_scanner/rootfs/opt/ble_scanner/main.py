@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.14"
+ADDON_VERSION = "1.0.15"
 
 class BLEScanner:
     def __init__(self):
@@ -203,6 +203,48 @@ class BLEScanner:
                 })
             except Exception as e:
                 logger.error(f"[API] Error in /api/config: {e}")
+                return jsonify({"error": str(e)}), 500
+        
+        @self.app.route('/api/test_proxy/<int:proxy_index>', methods=['GET'])
+        def test_proxy(proxy_index):
+            logger.info(f"[API] /api/test_proxy/{proxy_index} called")
+            try:
+                if proxy_index >= len(self.esp32_proxies):
+                    return jsonify({"error": "Proxy index out of range"}), 400
+                
+                proxy = self.esp32_proxies[proxy_index]
+                logger.info(f"[API] Testing proxy: {proxy}")
+                
+                # Test HTTP connectivity
+                import requests
+                try:
+                    response = requests.get(f"http://{proxy['host']}:{proxy['port']}/", timeout=5)
+                    http_status = response.status_code
+                    http_ok = response.status_code == 200
+                except Exception as e:
+                    http_status = f"Error: {str(e)}"
+                    http_ok = False
+                
+                # Test WebSocket connectivity
+                try:
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    ws_result = loop.run_until_complete(self.test_websocket_connection(proxy))
+                    loop.close()
+                except Exception as e:
+                    ws_result = f"Error: {str(e)}"
+                
+                return jsonify({
+                    "proxy": proxy,
+                    "http_test": {
+                        "status": http_status,
+                        "ok": http_ok
+                    },
+                    "websocket_test": ws_result
+                })
+            except Exception as e:
+                logger.error(f"[API] Error in /api/test_proxy: {e}")
                 return jsonify({"error": str(e)}), 500
         
         @self.app.errorhandler(Exception)
@@ -471,6 +513,18 @@ class BLEScanner:
         start_time = time.time()
         
         try:
+            # Test basic connectivity first
+            logger.info(f"[BLEPROXY] Testing connectivity to {proxy['host']}:{proxy['port']}")
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(f"http://{proxy['host']}:{proxy['port']}/", timeout=5) as response:
+                        logger.info(f"[BLEPROXY] HTTP connectivity test: {response.status}")
+                except Exception as e:
+                    logger.error(f"[BLEPROXY] HTTP connectivity test failed: {e}")
+                    # Try HTTP API as fallback
+                    await self.try_http_api(proxy)
+                    return
+            
             async with websockets.connect(ws_uri, ping_interval=30, ping_timeout=10) as websocket:
                 proxy_key = f"{proxy['host']}:{proxy['port']}"
                 self.proxy_connections[proxy_key] = True
@@ -518,6 +572,32 @@ class BLEScanner:
             # Try HTTP API as fallback
             await self.try_http_api(proxy)
 
+    async def test_websocket_connection(self, proxy):
+        """Test WebSocket connection to ESP32 proxy"""
+        ws_uri = f"ws://{proxy['host']}:{proxy['port']}"
+        try:
+            async with websockets.connect(ws_uri, ping_interval=30, ping_timeout=5) as websocket:
+                # Send authentication
+                auth_msg = {
+                    "type": "auth",
+                    "api_password": ""
+                }
+                await websocket.send(json.dumps(auth_msg))
+                
+                # Wait for response
+                try:
+                    response = await asyncio.wait_for(websocket.recv(), timeout=5)
+                    auth_result = json.loads(response)
+                    if auth_result.get("type") == "auth_ok":
+                        return {"status": "connected", "auth": "success"}
+                    else:
+                        return {"status": "connected", "auth": "failed", "response": auth_result}
+                except asyncio.TimeoutError:
+                    return {"status": "connected", "auth": "timeout"}
+                    
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+    
     async def try_http_api(self, proxy):
         """Try HTTP API as fallback for ESP32 proxy"""
         http_url = f"http://{proxy['host']}:{proxy['port']}/api"

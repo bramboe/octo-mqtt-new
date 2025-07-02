@@ -298,22 +298,32 @@
 
             async startScan() {
                 try {
-                    const response = await fetch('/api/scan/start', { method: 'POST' });
+                    const response = await fetch('/api/start_scan', { method: 'POST' });
                     const result = await response.json();
-                    this.showNotification(result.message, 'success');
+                    if (response.ok) {
+                        this.showNotification('Scan started successfully', 'success');
+                    } else {
+                        this.showNotification(result.error || 'Error starting scan', 'error');
+                    }
                     await this.loadStatus();
                 } catch (error) {
+                    console.error('Error starting scan:', error);
                     this.showNotification('Error starting scan', 'error');
                 }
             }
 
             async stopScan() {
                 try {
-                    const response = await fetch('/api/scan/stop', { method: 'POST' });
+                    const response = await fetch('/api/stop_scan', { method: 'POST' });
                     const result = await response.json();
-                    this.showNotification(result.message, 'success');
+                    if (response.ok) {
+                        this.showNotification('Scan stopped successfully', 'success');
+                    } else {
+                        this.showNotification(result.error || 'Error stopping scan', 'error');
+                    }
                     await this.loadStatus();
                 } catch (error) {
+                    console.error('Error stopping scan:', error);
                     this.showNotification('Error stopping scan', 'error');
                 }
             }

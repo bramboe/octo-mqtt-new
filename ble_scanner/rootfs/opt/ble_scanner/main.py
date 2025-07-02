@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.2"
+ADDON_VERSION = "1.0.3"
 
 class BLEScanner:
     def __init__(self):
@@ -132,25 +132,33 @@ class BLEScanner:
         
         @self.app.route('/api/start_scan', methods=['POST'])
         def start_scan():
-            logger.info("[SCAN] User requested scan start")
-            if self.running:
-                logger.warning("[SCAN] Scan already running")
-                return False
-            self.running = True
-            self.scan_thread = threading.Thread(target=self._run_scan_loop, daemon=True)
-            self.scan_thread.start()
-            logger.info("[SCAN] Scan thread started")
-            return True
+            logger.info("[API] /api/start_scan called")
+            try:
+                if self.running:
+                    logger.warning("[API] Scan already running")
+                    return jsonify({"status": "already_running", "error": "Scan already running"}), 400
+                self.running = True
+                self.scan_thread = threading.Thread(target=self._run_scan_loop, daemon=True)
+                self.scan_thread.start()
+                logger.info("[API] Scan started successfully")
+                return jsonify({"status": "started", "message": "Scan started successfully"})
+            except Exception as e:
+                logger.error(f"[API] Error in /api/start_scan: {e}")
+                return jsonify({"error": str(e)}), 500
         
         @self.app.route('/api/stop_scan', methods=['POST'])
         def stop_scan():
-            logger.info("[SCAN] User requested scan stop")
-            if not self.running:
-                logger.warning("[SCAN] Scan not running")
-                return False
-            self.running = False
-            logger.info("[SCAN] Scan stopped")
-            return True
+            logger.info("[API] /api/stop_scan called")
+            try:
+                if not self.running:
+                    logger.warning("[API] Scan not running")
+                    return jsonify({"status": "not_running", "error": "Scan not running"}), 400
+                self.running = False
+                logger.info("[API] Scan stopped successfully")
+                return jsonify({"status": "stopped", "message": "Scan stopped successfully"})
+            except Exception as e:
+                logger.error(f"[API] Error in /api/stop_scan: {e}")
+                return jsonify({"error": str(e)}), 500
         
         @self.app.route('/api/status')
         def get_status():
@@ -324,6 +332,18 @@ class BLEScanner:
                 logger.error(f"[SCAN] Error in scan loop: {e}")
                 await asyncio.sleep(5)
         logger.info("[SCAN] BLE scan loop stopped")
+
+    def _run_scan_loop(self):
+        """Run the scan loop in a separate thread"""
+        logger.info("[SCAN] Starting scan thread")
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.scan_loop())
+        except Exception as e:
+            logger.error(f"[SCAN] Exception in scan thread: {e}")
+        finally:
+            logger.info("[SCAN] Scan thread exited")
     
     def run(self):
         """Start the Flask application"""

@@ -1,6 +1,6 @@
 ---
 name: "BLE Scanner"
-version: "1.0.2"
+version: "1.0.3"
 slug: "ble_scanner"
 description: "Standalone BLE scanner with web UI for discovering and managing BLE devices"
 arch:

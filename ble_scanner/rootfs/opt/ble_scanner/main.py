@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.12"
+ADDON_VERSION = "1.0.13"
 
 class BLEScanner:
     def __init__(self):
@@ -248,6 +248,12 @@ class BLEScanner:
             self.mqtt_client = None
             return
             
+        # Check if we have valid credentials after auto-detection
+        if self.mqtt_user is None and self.mqtt_password is None:
+            logger.info("[MQTT] No valid credentials found, MQTT will be disabled.")
+            self.mqtt_client = None
+            return
+            
         self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"ble_scanner_{int(time.time())}")
         if self.mqtt_user and self.mqtt_user != '<auto_detect>':
             self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
@@ -425,7 +431,10 @@ class BLEScanner:
         return None, None
     
     def on_mqtt_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
+        # Convert ReasonCode to int for comparison
+        rc_int = rc.value if hasattr(rc, 'value') else int(rc)
+        
+        if rc_int == 0:
             logger.info("[MQTT] Successfully connected to MQTT broker")
             self.mqtt_connected = True
         else:
@@ -436,15 +445,18 @@ class BLEScanner:
                 4: "Bad username or password",
                 5: "Not authorized"
             }
-            error_msg = error_codes.get(rc, f"Unknown error code {rc}")
-            logger.error(f"[MQTT] Failed to connect to MQTT broker: {error_msg} (code {rc})")
+            error_msg = error_codes.get(rc_int, f"Unknown error code {rc_int}")
+            logger.error(f"[MQTT] Failed to connect to MQTT broker: {error_msg} (code {rc_int})")
             self.mqtt_connected = False
     
     def on_mqtt_disconnect(self, client, userdata, rc, properties=None):
-        if rc == 0:
+        # Convert ReasonCode to int for comparison
+        rc_int = rc.value if hasattr(rc, 'value') else int(rc)
+        
+        if rc_int == 0:
             logger.info("[MQTT] Cleanly disconnected from MQTT broker")
         else:
-            logger.warning(f"[MQTT] Unexpectedly disconnected from MQTT broker (code {rc})")
+            logger.warning(f"[MQTT] Unexpectedly disconnected from MQTT broker (code {rc_int})")
         self.mqtt_connected = False
     
     async def connect_esp32_proxy(self, proxy):

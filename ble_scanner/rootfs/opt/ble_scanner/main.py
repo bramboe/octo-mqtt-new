@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.1"
+ADDON_VERSION = "1.0.2"
 
 class BLEScanner:
     def __init__(self):
@@ -59,6 +59,7 @@ class BLEScanner:
         
     def load_config(self):
         """Load configuration from Home Assistant addon options"""
+        logger.info("[CONFIG] Loading configuration from /data/options.json...")
         try:
             config_path = "/data/options.json"
             if os.path.exists(config_path):
@@ -76,11 +77,11 @@ class BLEScanner:
                 # Set log level
                 if log_level == 'debug':
                     logging.getLogger().setLevel(logging.DEBUG)
-                logger.info(f"Loaded configuration: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}")
+                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}")
             else:
-                logger.warning("No configuration file found, using defaults")
+                logger.warning("[CONFIG] No configuration file found, using defaults")
         except Exception as e:
-            logger.error(f"Error loading configuration: {e}")
+            logger.error(f"[CONFIG] Error loading configuration: {e}")
     
     def setup_routes(self):
         """Setup Flask routes"""
@@ -91,10 +92,16 @@ class BLEScanner:
         
         @self.app.route('/api/devices')
         def get_devices():
-            return jsonify(list(self.devices.values()))
+            logger.info("[API] /api/devices called")
+            try:
+                return jsonify(list(self.devices.values()))
+            except Exception as e:
+                logger.error(f"[API] Error in /api/devices: {e}")
+                return jsonify({"error": str(e)}), 500
         
         @self.app.route('/api/devices/<mac_address>', methods=['POST'])
         def add_device(mac_address):
+            logger.info("[API] /api/devices/<mac_address> called")
             data = request.get_json()
             if not data:
                 return jsonify({'error': 'No data provided'}), 400
@@ -116,46 +123,34 @@ class BLEScanner:
         
         @self.app.route('/api/devices/<mac_address>', methods=['DELETE'])
         def remove_device(mac_address):
+            logger.info("[API] /api/devices/<mac_address> called")
             if mac_address.upper() in self.devices:
                 del self.devices[mac_address.upper()]
                 self.save_devices()
                 return jsonify({'message': 'Device removed'})
             return jsonify({'error': 'Device not found'}), 404
         
-        @self.app.route('/api/scan/start', methods=['POST'])
+        @self.app.route('/api/start_scan', methods=['POST'])
         def start_scan():
-            logger.info("[SCAN] /api/scan/start called")
-            try:
-                if self.running:
-                    logger.info("[SCAN] Scan already running.")
-                    return jsonify({'message': 'Scan already running'})
-                logger.info("[SCAN] Starting BLE scan loop (user request)")
-                self.running = True
-                def scan_thread():
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(self.scan_loop())
-                    except Exception as e:
-                        logger.error(f"[SCAN] Exception in scan thread: {e}")
-                    finally:
-                        logger.error("[SCAN] Scan thread exited unexpectedly!")
-                self.scan_thread = threading.Thread(target=scan_thread, daemon=True)
-                self.scan_thread.start()
-                return jsonify({'message': 'Scan started'})
-            except Exception as e:
-                logger.error(f"[SCAN] Exception in /api/scan/start: {e}")
-                return jsonify({'message': f'Error starting scan: {e}'}), 500
+            logger.info("[SCAN] User requested scan start")
+            if self.running:
+                logger.warning("[SCAN] Scan already running")
+                return False
+            self.running = True
+            self.scan_thread = threading.Thread(target=self._run_scan_loop, daemon=True)
+            self.scan_thread.start()
+            logger.info("[SCAN] Scan thread started")
+            return True
         
-        @self.app.route('/api/scan/stop', methods=['POST'])
+        @self.app.route('/api/stop_scan', methods=['POST'])
         def stop_scan():
-            logger.info("[SCAN] /api/scan/stop called")
+            logger.info("[SCAN] User requested scan stop")
             if not self.running:
-                logger.info("[SCAN] Scan already stopped.")
-                return jsonify({'message': 'Scan already stopped'})
-            logger.info("[SCAN] Stopping BLE scan loop (user request)")
+                logger.warning("[SCAN] Scan not running")
+                return False
             self.running = False
-            return jsonify({'message': 'Scan stopped'})
+            logger.info("[SCAN] Scan stopped")
+            return True
         
         @self.app.route('/api/status')
         def get_status():
@@ -165,6 +160,22 @@ class BLEScanner:
                 'proxy_count': len(self.esp32_proxies),
                 'scan_interval': self.scan_interval
             })
+        
+        @self.app.route('/api/config', methods=['GET'])
+        def api_config():
+            logger.info("[API] /api/config called")
+            try:
+                return jsonify({
+                    "esp32_proxies": self.esp32_proxies,
+                    "scan_interval": self.scan_interval,
+                    "mqtt_host": self.mqtt_host,
+                    "mqtt_port": self.mqtt_port,
+                    "mqtt_topic": self.mqtt_topic,
+                    "version": ADDON_VERSION
+                })
+            except Exception as e:
+                logger.error(f"[API] Error in /api/config: {e}")
+                return jsonify({"error": str(e)}), 500
         
         @self.app.errorhandler(Exception)
         def handle_exception(e):
@@ -193,7 +204,7 @@ class BLEScanner:
     def setup_mqtt(self):
         """Setup MQTT client and connect"""
         if not self.mqtt_host or self.mqtt_host == '<auto_detect>':
-            logger.info("MQTT host not set, MQTT will be disabled.")
+            logger.info("[MQTT] MQTT host not set, MQTT will be disabled.")
             self.mqtt_client = None
             return
         self.mqtt_client = mqtt.Client()
@@ -202,10 +213,11 @@ class BLEScanner:
         self.mqtt_client.on_connect = self.on_mqtt_connect
         self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
         try:
+            logger.info(f"[MQTT] Connecting to MQTT broker at {self.mqtt_host}:{self.mqtt_port}...")
             self.mqtt_client.connect(self.mqtt_host, self.mqtt_port, 60)
             self.mqtt_client.loop_start()
         except Exception as e:
-            logger.error(f"MQTT connection failed: {e}")
+            logger.error(f"[MQTT] MQTT connection failed: {e}")
             self.mqtt_client = None
     
     def on_mqtt_connect(self, client, userdata, flags, rc):
@@ -223,29 +235,29 @@ class BLEScanner:
     async def connect_esp32_proxy(self, proxy):
         """Connect to ESP32 BLE proxy with detailed logging"""
         uri = f"ws://{proxy['host']}:{proxy['port']}"
-        logger.info(f"[BLEProxy] Attempting connection to {uri}")
+        logger.info(f"[BLEPROXY] Attempting connection to {uri}")
         start_time = time.time()
         try:
             async with websockets.connect(uri) as websocket:
-                logger.info(f"[BLEProxy] Connected to {proxy['host']}:{proxy['port']} after {time.time() - start_time:.2f}s")
+                logger.info(f"[BLEPROXY] Connected to {proxy['host']}:{proxy['port']} after {time.time() - start_time:.2f}s")
                 # Subscribe to BLE advertisements
                 subscribe_msg = {
                     "id": 1,
                     "type": "subscribe_bluetooth_le_advertisements"
                 }
                 await websocket.send(json.dumps(subscribe_msg))
-                logger.info(f"[BLEProxy] Subscribed to BLE advertisements on {proxy['host']}:{proxy['port']}")
+                logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {proxy['host']}:{proxy['port']}")
                 # Listen for BLE advertisements
                 async for message in websocket:
                     try:
                         data = json.loads(message)
                         await self.process_ble_advertisement(data, f"{proxy['host']}:{proxy['port']}")
                     except json.JSONDecodeError:
-                        logger.warning(f"[BLEProxy] Invalid JSON from proxy {proxy['host']}:{proxy['port']}: {message}")
+                        logger.warning(f"[BLEPROXY] Invalid JSON from proxy {proxy['host']}:{proxy['port']}: {message}")
                     except Exception as e:
-                        logger.error(f"[BLEProxy] Error processing message from {proxy['host']}:{proxy['port']}: {e}")
+                        logger.error(f"[BLEPROXY] Error processing message from {proxy['host']}:{proxy['port']}: {e}")
         except Exception as e:
-            logger.error(f"[BLEProxy] Error connecting to {proxy['host']}:{proxy['port']}: {e}")
+            logger.error(f"[BLEPROXY] Error connecting to {proxy['host']}:{proxy['port']}: {e}")
     
     async def process_ble_advertisement(self, data, proxy_name):
         """Process BLE advertisement data and publish to MQTT if enabled"""

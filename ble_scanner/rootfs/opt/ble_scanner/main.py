@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 import websockets
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, render_template_string
 from flask_cors import CORS
 import paho.mqtt.client as mqtt
 import threading
@@ -31,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.18"
+ADDON_VERSION = "1.0.19"
 
 class BLEScanner:
     def __init__(self):
@@ -112,16 +112,49 @@ class BLEScanner:
         
         @self.app.route('/')
         def index():
-            return render_template('index.html')
+            """Main web interface"""
+            return render_template_string(HTML_TEMPLATE)
+        
+        @self.app.route('/api/status')
+        def api_status():
+            """Get add-on status"""
+            return jsonify(self.get_status())
         
         @self.app.route('/api/devices')
-        def get_devices():
-            logger.info("[API] /api/devices called")
-            try:
-                return jsonify(list(self.devices.values()))
-            except Exception as e:
-                logger.error(f"[API] Error in /api/devices: {e}")
-                return jsonify({"error": str(e)}), 500
+        def api_devices():
+            """Get discovered devices"""
+            return jsonify(self.get_devices())
+        
+        @self.app.route('/api/scan/start', methods=['POST'])
+        def api_start_scan():
+            """Start BLE scanning"""
+            return jsonify(self.start_scan())
+        
+        @self.app.route('/api/scan/stop', methods=['POST'])
+        def api_stop_scan():
+            """Stop BLE scanning"""
+            return jsonify(self.stop_scan())
+        
+        @self.app.route('/api/devices/clear', methods=['POST'])
+        def api_clear_devices():
+            """Clear all devices"""
+            return jsonify(self.clear_devices())
+        
+        @self.app.route('/api/diagnostic')
+        def api_diagnostic():
+            """Diagnostic endpoint"""
+            return jsonify({
+                "version": ADDON_VERSION,
+                "config": {
+                    "mqtt_host": self.mqtt_host,
+                    "mqtt_port": self.mqtt_port,
+                    "mqtt_topic": self.mqtt_topic,
+                    "mqtt_discovery_enabled": self.mqtt_discovery_enabled,
+                    "esp32_proxies": self.esp32_proxies
+                },
+                "status": self.get_status(),
+                "proxy_connections": self.proxy_connections
+            })
         
         @self.app.route('/api/devices/<mac_address>', methods=['POST'])
         def add_device(mac_address):
@@ -154,133 +187,52 @@ class BLEScanner:
                 return jsonify({'message': 'Device removed'})
             return jsonify({'error': 'Device not found'}), 404
         
-        @self.app.route('/api/start_scan', methods=['POST'])
-        def start_scan():
-            logger.info("[API] /api/start_scan called")
-            try:
-                if self.running:
-                    logger.warning("[API] Scan already running")
-                    return jsonify({"status": "already_running", "error": "Scan already running"}), 400
-                self.running = True
-                self.scan_thread = threading.Thread(target=self._run_scan_loop, daemon=True)
-                self.scan_thread.start()
-                logger.info("[API] Scan started successfully")
-                return jsonify({"status": "started", "message": "Scan started successfully"})
-            except Exception as e:
-                logger.error(f"[API] Error in /api/start_scan: {e}")
-                return jsonify({"error": str(e)}), 500
-        
-        @self.app.route('/api/stop_scan', methods=['POST'])
-        def stop_scan():
-            logger.info("[API] /api/stop_scan called")
-            try:
-                if not self.running:
-                    logger.warning("[API] Scan not running")
-                    return jsonify({"status": "not_running", "error": "Scan not running"}), 400
-                self.running = False
-                logger.info("[API] Scan stopped successfully")
-                return jsonify({"status": "stopped", "message": "Scan stopped successfully"})
-            except Exception as e:
-                logger.error(f"[API] Error in /api/stop_scan: {e}")
-                return jsonify({"error": str(e)}), 500
-        
-        @self.app.route('/api/status')
-        def get_status():
-            connected_proxies = sum(1 for status in self.proxy_connections.values() if status)
-            return jsonify({
-                'running': self.running,
-                'device_count': len(self.devices),
-                'proxy_count': len(self.esp32_proxies),
-                'connected_proxies': connected_proxies,
-                'scan_interval': self.scan_interval,
-                'mqtt_connected': self.mqtt_connected,
-                'mqtt_discovery_enabled': self.mqtt_discovery_enabled,
-                'proxy_connections': self.proxy_connections
-            })
-        
-        @self.app.route('/api/config', methods=['GET'])
-        def api_config():
-            logger.info("[API] /api/config called")
-            try:
-                return jsonify({
-                    "esp32_proxies": self.esp32_proxies,
-                    "scan_interval": self.scan_interval,
-                    "mqtt_host": self.mqtt_host,
-                    "mqtt_port": self.mqtt_port,
-                    "mqtt_topic": self.mqtt_topic,
-                    "mqtt_discovery_enabled": self.mqtt_discovery_enabled,
-                    "version": ADDON_VERSION
-                })
-            except Exception as e:
-                logger.error(f"[API] Error in /api/config: {e}")
-                return jsonify({"error": str(e)}), 500
-        
         @self.app.route('/api/test_proxy/<int:proxy_index>', methods=['GET'])
         def test_proxy(proxy_index):
-            logger.info(f"[API] /api/test_proxy/{proxy_index} called")
-            try:
-                if proxy_index >= len(self.esp32_proxies):
-                    return jsonify({"error": "Proxy index out of range"}), 400
-                
-                proxy = self.esp32_proxies[proxy_index]
-                logger.info(f"[API] Testing proxy: {proxy}")
-                
-                # Test HTTP connectivity
-                import requests
+            """Test ESP32 proxy connection"""
+            if proxy_index >= len(self.esp32_proxies):
+                return jsonify({'error': 'Invalid proxy index'}), 400
+            
+            proxy = self.esp32_proxies[proxy_index]
+            logger.info(f"[API] Testing proxy {proxy_index}: {proxy['host']}:{proxy.get('port', 6053)}")
+            
+            # Run test in background thread
+            def run_test():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 try:
-                    response = requests.get(f"http://{proxy['host']}:{proxy['port']}/", timeout=5)
-                    http_status = response.status_code
-                    http_ok = response.status_code == 200
+                    result = loop.run_until_complete(self.test_websocket_connection(proxy))
+                    logger.info(f"[API] Proxy test result: {result}")
                 except Exception as e:
-                    http_status = f"Error: {str(e)}"
-                    http_ok = False
-                
-                # Test WebSocket connectivity
-                try:
-                    import asyncio
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    ws_result = loop.run_until_complete(self.test_websocket_connection(proxy))
+                    logger.error(f"[API] Proxy test error: {e}")
+                finally:
                     loop.close()
-                except Exception as e:
-                    ws_result = f"Error: {str(e)}"
-                
-                return jsonify({
-                    "proxy": proxy,
-                    "http_test": {
-                        "status": http_status,
-                        "ok": http_ok
-                    },
-                    "websocket_test": ws_result
-                })
-            except Exception as e:
-                logger.error(f"[API] Error in /api/test_proxy: {e}")
-                return jsonify({"error": str(e)}), 500
+            
+            threading.Thread(target=run_test, daemon=True).start()
+            return jsonify({'message': 'Proxy test started', 'proxy': proxy})
         
         @self.app.errorhandler(Exception)
         def handle_exception(e):
-            logger.error(f"[FLASK] Unhandled exception: {e}")
-            return jsonify({'message': f'Internal server error: {e}'}), 500
-    
+            logger.error(f"[API] Unhandled exception: {e}")
+            return jsonify({'error': str(e)}), 500
+
     def save_devices(self):
-        """Save discovered devices to file"""
+        """Save devices to persistent storage"""
         try:
-            with open('/data/ble_devices/devices.json', 'w') as f:
-                json.dump(self.devices, f, indent=2)
+            with open('/data/devices.json', 'w') as f:
+                json.dump(self.devices, f)
         except Exception as e:
             logger.error(f"Error saving devices: {e}")
-    
+
     def load_devices(self):
-        """Load previously discovered devices from file"""
+        """Load devices from persistent storage"""
         try:
-            devices_file = '/data/ble_devices/devices.json'
-            if os.path.exists(devices_file):
-                with open(devices_file, 'r') as f:
+            if os.path.exists('/data/devices.json'):
+                with open('/data/devices.json', 'r') as f:
                     self.devices = json.load(f)
-                logger.info(f"Loaded {len(self.devices)} devices from storage")
         except Exception as e:
             logger.error(f"Error loading devices: {e}")
-    
+
     def setup_mqtt(self):
         """Setup MQTT client using smartbed-mqtt approach"""
         # Handle auto-detection for MQTT host
@@ -599,10 +551,12 @@ class BLEScanner:
             'version': ADDON_VERSION,
             'running': self.running,
             'device_count': len(self.devices),
-            'proxy_connections': self.proxy_connections,
+            'proxy_count': len(self.esp32_proxies),
+            'connected_proxies': sum(1 for status in self.proxy_connections.values() if status),
+            'scan_interval': self.scan_interval,
             'mqtt_connected': self.mqtt_connected,
             'mqtt_discovery_enabled': self.mqtt_discovery_enabled,
-            'proxy_count': len(self.esp32_proxies)
+            'proxy_connections': self.proxy_connections
         }
 
     def get_devices(self):
@@ -629,82 +583,288 @@ class BLEScanner:
 
     async def test_websocket_connection(self, proxy):
         """Test WebSocket connection to ESP32 proxy"""
-        ws_uri = f"ws://{proxy['host']}:{proxy['port']}"
+        host = proxy['host']
+        port = proxy.get('port', 6053)
+        password = proxy.get('password', '')
+        
+        logger.info(f"[TEST] Testing WebSocket connection to {host}:{port}")
+        
         try:
-            async with websockets.connect(ws_uri, ping_interval=30, ping_timeout=5) as websocket:
-                # Send authentication
-                auth_msg = {
-                    "type": "auth",
-                    "api_password": ""
-                }
-                await websocket.send(json.dumps(auth_msg))
-                
-                # Wait for response
-                try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=5)
-                    auth_result = json.loads(response)
-                    if auth_result.get("type") == "auth_ok":
-                        return {"status": "connected", "auth": "success"}
-                    else:
-                        return {"status": "connected", "auth": "failed", "response": auth_result}
-                except asyncio.TimeoutError:
-                    return {"status": "connected", "auth": "timeout"}
-                    
+            # Try ESPHome native API first
+            client = APIClient(host, port, password=password)
+            await client.connect(login=True)
+            await client.disconnect()
+            logger.info(f"[TEST] ESPHome API connection successful to {host}:{port}")
+            return {"status": "success", "method": "esphome_api", "host": host, "port": port}
+            
+        except APIConnectionError as e:
+            logger.warning(f"[TEST] ESPHome API failed: {e}")
+            # Try HTTP API fallback
+            return await self.try_http_api(proxy)
+            
         except Exception as e:
-            return {"status": "failed", "error": str(e)}
-    
+            logger.error(f"[TEST] Connection test failed: {e}")
+            return {"status": "error", "error": str(e), "host": host, "port": port}
+
     async def try_http_api(self, proxy):
-        """Try HTTP API as fallback for ESP32 proxy"""
-        http_url = f"http://{proxy['host']}:{proxy['port']}/api"
-        logger.info(f"[BLEPROXY] Trying HTTP API fallback: {http_url}")
+        """Try HTTP API as fallback"""
+        host = proxy['host']
+        port = proxy.get('port', 6053)
         
         try:
             async with aiohttp.ClientSession() as session:
-                # Get ESP32 info
-                async with session.get(f"{http_url}/info") as response:
+                url = f"http://{host}:{port}/"
+                async with session.get(url, timeout=5) as response:
                     if response.status == 200:
-                        info = await response.json()
-                        logger.info(f"[BLEPROXY] ESP32 Info: {info}")
+                        logger.info(f"[TEST] HTTP API connection successful to {host}:{port}")
+                        return {"status": "success", "method": "http_api", "host": host, "port": port}
                     else:
-                        logger.warning(f"[BLEPROXY] HTTP API info failed: {response.status}")
-                        
-                # Try to get BLE devices via HTTP
-                async with session.get(f"{http_url}/ble_devices") as response:
-                    if response.status == 200:
-                        devices = await response.json()
-                        logger.info(f"[BLEPROXY] Found {len(devices)} devices via HTTP API")
-                        for device in devices:
-                            await self.process_ble_advertisement({
-                                'bluetooth_le_advertisement': device
-                            }, f"{proxy['host']}:{proxy['port']} (HTTP)")
-                    else:
-                        logger.warning(f"[BLEPROXY] HTTP API BLE devices failed: {response.status}")
-                        
+                        logger.warning(f"[TEST] HTTP API returned status {response.status}")
+                        return {"status": "error", "error": f"HTTP status {response.status}", "host": host, "port": port}
         except Exception as e:
-            logger.error(f"[BLEPROXY] HTTP API fallback failed: {e}")
-    
+            logger.error(f"[TEST] HTTP API fallback failed: {e}")
+            return {"status": "error", "error": str(e), "host": host, "port": port}
+
     def run(self):
         """Start the Flask application"""
-        # Load previously discovered devices
-        self.load_devices()
-        # Do not start scan loop here; only start on user request
-        # Run Flask app
+        logger.info("[STARTUP] Starting Flask development server...")
         self.app.run(host='0.0.0.0', port=8099, debug=False)
-        # Cleanup MQTT
-        if self.mqtt_client:
-            self.mqtt_client.loop_stop()
-            self.mqtt_client.disconnect()
 
-def main():
-    """Main entry point"""
-    try:
-        scanner = BLEScanner()
-        scanner.run()
-    except KeyboardInterrupt:
-        logger.info("Shutting down BLE Scanner")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+# HTML template for web interface
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BLE Scanner</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; }
+        .status { background: #e8f5e8; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+        .controls { margin-bottom: 20px; }
+        .btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-right: 10px; }
+        .btn:hover { background: #0056b3; }
+        .btn.danger { background: #dc3545; }
+        .btn.danger:hover { background: #c82333; }
+        .btn.success { background: #28a745; }
+        .btn.success:hover { background: #218838; }
+        .devices { margin-top: 20px; }
+        .device { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; margin-bottom: 10px; }
+        .device h3 { margin: 0 0 10px 0; color: #495057; }
+        .device-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+        .info-item { background: white; padding: 8px; border-radius: 3px; border: 1px solid #e9ecef; }
+        .info-label { font-weight: bold; color: #6c757d; font-size: 0.9em; }
+        .info-value { color: #495057; }
+        .scanning { color: #28a745; font-weight: bold; }
+        .stopped { color: #dc3545; font-weight: bold; }
+        .refresh-btn { float: right; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>BLE Scanner v{{ version }}</h1>
+            <p>Discover and monitor BLE devices via ESP32 proxies</p>
+        </div>
+        
+        <div class="status" id="status">
+            <h3>Status</h3>
+            <div id="status-content">Loading...</div>
+        </div>
+        
+        <div class="controls">
+            <button class="btn success" onclick="startScan()">Start Scan</button>
+            <button class="btn danger" onclick="stopScan()">Stop Scan</button>
+            <button class="btn" onclick="clearDevices()">Clear Devices</button>
+            <button class="btn" onclick="refreshData()" class="refresh-btn">Refresh</button>
+        </div>
+        
+        <div class="devices" id="devices">
+            <h3>Discovered Devices (<span id="device-count">0</span>)</h3>
+            <div id="devices-content">No devices discovered yet.</div>
+        </div>
+    </div>
 
-if __name__ == "__main__":
-    main() 
+    <script>
+        let refreshInterval;
+        
+        function updateStatus(data) {
+            const statusContent = document.getElementById('status-content');
+            const scanStatus = data.running ? '<span class="scanning">SCANNING</span>' : '<span class="stopped">STOPPED</span>';
+            
+            statusContent.innerHTML = `
+                <div class="device-info">
+                    <div class="info-item">
+                        <div class="info-label">Scan Status</div>
+                        <div class="info-value">${scanStatus}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Devices Found</div>
+                        <div class="info-value">${data.device_count}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">ESP32 Proxies</div>
+                        <div class="info-value">${data.proxy_count}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">MQTT Connected</div>
+                        <div class="info-value">${data.mqtt_connected ? 'Yes' : 'No'}</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function updateDevices(devices) {
+            const devicesContent = document.getElementById('devices-content');
+            const deviceCount = document.getElementById('device-count');
+            
+            deviceCount.textContent = Object.keys(devices).length;
+            
+            if (Object.keys(devices).length === 0) {
+                devicesContent.innerHTML = '<p>No devices discovered yet.</p>';
+                return;
+            }
+            
+            let html = '';
+            Object.values(devices).forEach(device => {
+                const lastSeen = new Date(device.last_seen).toLocaleString();
+                const rssiColor = device.rssi > -50 ? '#28a745' : device.rssi > -70 ? '#ffc107' : '#dc3545';
+                
+                html += `
+                    <div class="device">
+                        <h3>${device.name || 'Unknown Device'}</h3>
+                        <div class="device-info">
+                            <div class="info-item">
+                                <div class="info-label">Address</div>
+                                <div class="info-value">${device.address}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">RSSI</div>
+                                <div class="info-value" style="color: ${rssiColor}">${device.rssi} dBm</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Last Seen</div>
+                                <div class="info-value">${lastSeen}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Seen Count</div>
+                                <div class="info-value">${device.seen_count}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Proxy</div>
+                                <div class="info-value">${device.proxy}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            devicesContent.innerHTML = html;
+        }
+        
+        async function refreshData() {
+            try {
+                const [statusResponse, devicesResponse] = await Promise.all([
+                    fetch('/api/status'),
+                    fetch('/api/devices')
+                ]);
+                
+                const status = await statusResponse.json();
+                const devices = await devicesResponse.json();
+                
+                updateStatus(status);
+                updateDevices(devices);
+            } catch (error) {
+                console.error('Error refreshing data:', error);
+            }
+        }
+        
+        async function startScan() {
+            try {
+                await fetch('/api/scan/start', { method: 'POST' });
+                refreshData();
+            } catch (error) {
+                console.error('Error starting scan:', error);
+            }
+        }
+        
+        async function stopScan() {
+            try {
+                await fetch('/api/scan/stop', { method: 'POST' });
+                refreshData();
+            } catch (error) {
+                console.error('Error stopping scan:', error);
+            }
+        }
+        
+        async function clearDevices() {
+            try {
+                await fetch('/api/devices/clear', { method: 'POST' });
+                refreshData();
+            } catch (error) {
+                console.error('Error clearing devices:', error);
+            }
+        }
+        
+        // Initial load
+        refreshData();
+        
+        // Auto-refresh every 5 seconds
+        refreshInterval = setInterval(refreshData, 5000);
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
+if __name__ == '__main__':
+    logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} initializing...")
+    
+    # Create scanner instance
+    scanner = BLEScanner()
+    
+    # Import and run with Gunicorn for production
+    import gunicorn.app.base
+    
+    class StandaloneApplication(gunicorn.app.base.BaseApplication):
+        def __init__(self, app, options=None):
+            self.options = options or {}
+            self.application = app
+            super().__init__()
+        
+        def load_config(self):
+            config = {key: value for key, value in self.options.items()
+                     if key in self.cfg.settings and value is not None}
+            for key, value in config.items():
+                self.cfg.set(key.lower(), value)
+        
+        def load(self):
+            return self.application
+    
+    # Gunicorn configuration for production
+    options = {
+        'bind': '0.0.0.0:8099',
+        'workers': 1,  # Single worker for this add-on
+        'worker_class': 'sync',
+        'worker_connections': 1000,
+        'max_requests': 1000,
+        'max_requests_jitter': 50,
+        'timeout': 30,
+        'keepalive': 2,
+        'preload_app': True,
+        'access_logfile': '-',  # Log to stdout
+        'error_logfile': '-',   # Log to stderr
+        'loglevel': 'info',
+        'access_log_format': '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
+    }
+    
+    # Start Gunicorn server
+    StandaloneApplication(scanner.app, options).run() 

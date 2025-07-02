@@ -7,4 +7,5 @@ asyncio-mqtt==0.16.1
 mqtt==4.2.8
 requests==2.31.0
 python-dotenv==1.0.0
-aioesphomeapi==1.0.0 
+aioesphomeapi==1.0.0
+gunicorn==21.2.0 

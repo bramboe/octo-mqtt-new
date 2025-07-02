@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.13"
+ADDON_VERSION = "1.0.14"
 
 class BLEScanner:
     def __init__(self):
@@ -45,7 +45,8 @@ class BLEScanner:
         self.mqtt_port = 1883
         self.mqtt_user = None
         self.mqtt_password = None
-        self.mqtt_topic = "ble_scanner/devices"
+        self.mqtt_topic = "ble_scanner/data"
+        self.mqtt_discovery_enabled = False
         self.mqtt_client = None
         self.mqtt_connected = False
         # Proxy connection tracking
@@ -85,11 +86,12 @@ class BLEScanner:
                         self.mqtt_port = 1883
                 self.mqtt_user = config.get('mqtt_user', None)
                 self.mqtt_password = config.get('mqtt_password', None)
-                self.mqtt_topic = config.get('mqtt_topic', 'ble_scanner/devices')
+                self.mqtt_topic = config.get('mqtt_topic', 'ble_scanner/data')
+                self.mqtt_discovery_enabled = config.get('mqtt_discovery_enabled', False)
                 # Set log level
                 if log_level == 'debug':
                     logging.getLogger().setLevel(logging.DEBUG)
-                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}")
+                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery_enabled}")
             else:
                 logger.warning("[CONFIG] No configuration file found, using defaults")
         except Exception as e:
@@ -182,6 +184,7 @@ class BLEScanner:
                 'connected_proxies': connected_proxies,
                 'scan_interval': self.scan_interval,
                 'mqtt_connected': self.mqtt_connected,
+                'mqtt_discovery_enabled': self.mqtt_discovery_enabled,
                 'proxy_connections': self.proxy_connections
             })
         
@@ -195,6 +198,7 @@ class BLEScanner:
                     "mqtt_host": self.mqtt_host,
                     "mqtt_port": self.mqtt_port,
                     "mqtt_topic": self.mqtt_topic,
+                    "mqtt_discovery_enabled": self.mqtt_discovery_enabled,
                     "version": ADDON_VERSION
                 })
             except Exception as e:
@@ -586,16 +590,90 @@ class BLEScanner:
         """Publish a device dict to MQTT as JSON"""
         if self.mqtt_client and self.mqtt_connected:
             try:
-                payload = json.dumps(device)
-                result = self.mqtt_client.publish(self.mqtt_topic, payload, qos=0, retain=False)
-                if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                    logger.debug(f"[MQTT] Published device {device['mac_address']} to {self.mqtt_topic}")
+                if self.mqtt_discovery_enabled:
+                    # Publish Home Assistant MQTT device discovery messages
+                    self.publish_mqtt_discovery(device)
                 else:
-                    logger.error(f"[MQTT] Failed to publish device {device['mac_address']}: error code {result.rc}")
+                    # Publish simple JSON data
+                    payload = json.dumps(device)
+                    result = self.mqtt_client.publish(self.mqtt_topic, payload, qos=0, retain=False)
+                    if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                        logger.debug(f"[MQTT] Published device {device['mac_address']} to {self.mqtt_topic}")
+                    else:
+                        logger.error(f"[MQTT] Failed to publish device {device['mac_address']}: error code {result.rc}")
             except Exception as e:
                 logger.error(f"[MQTT] Exception publishing device {device['mac_address']}: {e}")
         else:
             logger.debug(f"[MQTT] Skipping publish for {device['mac_address']} - MQTT not connected")
+    
+    def publish_mqtt_discovery(self, device):
+        """Publish Home Assistant MQTT device discovery messages"""
+        try:
+            mac_address = device['mac_address']
+            device_id = mac_address.replace(':', '').lower()
+            device_name = device['name'] or f"BLE Device {mac_address}"
+            
+            # Device configuration
+            device_config = {
+                "identifiers": [f"ble_scanner_{device_id}"],
+                "name": device_name,
+                "manufacturer": "BLE Scanner",
+                "model": "BLE Device",
+                "via_device": "ble_scanner_addon"
+            }
+            
+            # Sensor for RSSI
+            rssi_config = {
+                "device": device_config,
+                "name": f"{device_name} RSSI",
+                "state_topic": f"ble_scanner/{device_id}/rssi",
+                "unit_of_measurement": "dBm",
+                "device_class": "signal_strength",
+                "unique_id": f"ble_scanner_{device_id}_rssi"
+            }
+            
+            # Sensor for last seen
+            last_seen_config = {
+                "device": device_config,
+                "name": f"{device_name} Last Seen",
+                "state_topic": f"ble_scanner/{device_id}/last_seen",
+                "device_class": "timestamp",
+                "unique_id": f"ble_scanner_{device_id}_last_seen"
+            }
+            
+            # Binary sensor for presence
+            presence_config = {
+                "device": device_config,
+                "name": f"{device_name} Presence",
+                "state_topic": f"ble_scanner/{device_id}/presence",
+                "device_class": "presence",
+                "unique_id": f"ble_scanner_{device_id}_presence"
+            }
+            
+            # Publish device discovery messages
+            discovery_topic_base = "homeassistant"
+            
+            # Publish RSSI sensor
+            rssi_topic = f"{discovery_topic_base}/sensor/ble_scanner_{device_id}_rssi/config"
+            self.mqtt_client.publish(rssi_topic, json.dumps(rssi_config), qos=1, retain=True)
+            
+            # Publish last seen sensor
+            last_seen_topic = f"{discovery_topic_base}/sensor/ble_scanner_{device_id}_last_seen/config"
+            self.mqtt_client.publish(last_seen_topic, json.dumps(last_seen_config), qos=1, retain=True)
+            
+            # Publish presence sensor
+            presence_topic = f"{discovery_topic_base}/binary_sensor/ble_scanner_{device_id}_presence/config"
+            self.mqtt_client.publish(presence_topic, json.dumps(presence_config), qos=1, retain=True)
+            
+            # Publish current values
+            self.mqtt_client.publish(f"ble_scanner/{device_id}/rssi", str(device['rssi']), qos=0, retain=False)
+            self.mqtt_client.publish(f"ble_scanner/{device_id}/last_seen", device['last_seen'], qos=0, retain=False)
+            self.mqtt_client.publish(f"ble_scanner/{device_id}/presence", "ON", qos=0, retain=False)
+            
+            logger.debug(f"[MQTT] Published discovery messages for device {mac_address}")
+            
+        except Exception as e:
+            logger.error(f"[MQTT] Exception publishing discovery for device {device['mac_address']}: {e}")
     
     async def scan_loop(self):
         logger.info("[SCAN] Starting BLE scan loop")

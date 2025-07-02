@@ -11,6 +11,7 @@ A standalone Home Assistant addon that scans for Bluetooth Low Energy (BLE) devi
 - 💾 **Persistent Storage**: Devices are saved and restored between restarts
 - 🔧 **Configurable**: Customize scan intervals and proxy settings
 - 📊 **Device Analytics**: View RSSI, manufacturer data, and service information
+- 📡 **MQTT Integration**: Optional Home Assistant MQTT device discovery
 
 ## Prerequisites
 
@@ -55,6 +56,25 @@ Before using this addon, you need to set up ESP32 devices as BLE proxies. Follow
    ```
 
 2. **Network Configuration**: Ensure your ESP32 proxies are accessible on your network
+
+## Configuration
+
+### MQTT Settings
+
+The addon supports MQTT integration with Home Assistant:
+
+- **MQTT Host**: Set to `<auto_detect>` to automatically detect your MQTT broker
+- **MQTT Port**: Set to `<auto_detect>` to use the default port (1883)
+- **MQTT Credentials**: Set to `<auto_detect>` to automatically detect credentials
+- **MQTT Topic**: Topic for publishing device data (default: `ble_scanner/data`)
+- **MQTT Discovery**: Enable/disable Home Assistant MQTT device discovery
+
+When MQTT Discovery is enabled, the addon will create Home Assistant devices with:
+- RSSI sensor (signal strength in dBm)
+- Last seen sensor (timestamp)
+- Presence binary sensor (ON when device is detected)
+
+When MQTT Discovery is disabled, device data is published as JSON to the configured topic.
 
 ## Installation
 

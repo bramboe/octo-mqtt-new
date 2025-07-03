@@ -7,7 +7,8 @@ backlog = 2048
 
 # Worker processes
 workers = 1  # Single worker for this add-on
-worker_class = "sync"
+worker_class = "gthread"
+threads = 4  # Number of threads per worker
 worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50

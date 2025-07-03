@@ -21,6 +21,7 @@ import threading
 import requests
 from asyncio_mqtt import Client as MqttClient
 import asyncio_mqtt
+from aioesphomeapi import APIConnection, APIConnectionError
 
 # Configure logging
 logging.basicConfig(
@@ -29,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.31"
+ADDON_VERSION = "1.0.32"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -42,9 +43,9 @@ class BLEScanner:
     def __init__(self):
         logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} initializing...")
         self.devices = {}
-        self.scan_interval = 30
+        self.bleProxies = []
+        self.proxy_connections = {}
         self.running = True
-        self.scan_thread = None
         # MQTT config
         self.mqtt_host = None
         self.mqtt_port = 1883
@@ -53,16 +54,12 @@ class BLEScanner:
         self.mqtt_discovery = False
         self.mqtt_client = None
         self.mqtt_connected = False
-        
         # Load configuration
         self.load_config()
-        
         # Setup MQTT
         self.setup_mqtt()
-        
-        # Start scan loop
-        self.scan_thread = threading.Thread(target=self.scan_loop, daemon=True)
-        self.scan_thread.start()
+        # Start BLE proxy connections
+        self.start_ble_proxies()
         
     def load_config(self):
         """Load configuration from Home Assistant addon options"""
@@ -72,18 +69,13 @@ class BLEScanner:
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                self.scan_interval = config.get('scan_interval', 30)
-                log_level = config.get('log_level', 'info')
-                # MQTT (smartbed-mqtt style)
+                self.bleProxies = config.get('bleProxies', [])
                 self.mqtt_host = config.get('mqtt_host', '<auto_detect>')
                 self.mqtt_port = int(config.get('mqtt_port', 1883))
                 self.mqtt_username = config.get('mqtt_username', '')
                 self.mqtt_password = config.get('mqtt_password', '')
                 self.mqtt_discovery = config.get('mqtt_discovery', False)
-                # Set log level
-                if log_level == 'debug':
-                    logging.getLogger().setLevel(logging.DEBUG)
-                logger.info(f"[CONFIG] Loaded: MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery}")
+                logger.info(f"[CONFIG] Loaded: {len(self.bleProxies)} BLE proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery}")
             else:
                 logger.warning("[CONFIG] No configuration file found, using defaults")
         except Exception as e:
@@ -184,34 +176,27 @@ class BLEScanner:
     def auto_detect_mqtt_host(self):
         """Auto-detect MQTT broker host using smartbed-mqtt approach"""
         logger.info("[MQTT] Auto-detecting MQTT broker...")
-        
-        # Try common MQTT broker hostnames
         possible_hosts = [
-            'core-mosquitto',  # Home Assistant MQTT add-on
-            'mosquitto',       # Alternative name
-            'mqtt',           # Generic MQTT service
-            'localhost',      # Local MQTT
-            '127.0.0.1'       # Local MQTT IP
+            'core-mosquitto',
+            'mosquitto',
+            'mqtt',
+            'localhost',
+            '127.0.0.1'
         ]
-        
         for host in possible_hosts:
             try:
                 logger.info(f"[MQTT] Trying to connect to {host}:{self.mqtt_port}...")
-                # Try to connect to MQTT broker
                 import socket
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5)
                 result = sock.connect_ex((host, self.mqtt_port))
                 sock.close()
-                
                 if result == 0:
                     logger.info(f"[MQTT] Found MQTT broker at {host}:{self.mqtt_port}")
                     return host
-                    
             except Exception as e:
                 logger.debug(f"[MQTT] Failed to connect to {host}: {e}")
                 continue
-        
         logger.warning("[MQTT] Could not auto-detect MQTT broker")
         return None
 
@@ -311,21 +296,98 @@ class BLEScanner:
         except Exception:
             return False
 
-    def scan_loop(self):
-        """Main scan loop - currently just keeps the thread alive"""
-        logger.info("[SCAN] BLE scan loop started")
-        while self.running:
-            time.sleep(1)
-        logger.info("[SCAN] BLE scan loop stopped")
+    def start_ble_proxies(self):
+        for proxy in self.bleProxies:
+            threading.Thread(target=self._run_ble_proxy, args=(proxy,), daemon=True).start()
+
+    def _run_ble_proxy(self, proxy):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.connect_ble_proxy(proxy))
+        except Exception as e:
+            logger.error(f"[PROXY] Error in BLE proxy connection: {e}")
+        finally:
+            loop.close()
+
+    async def connect_ble_proxy(self, proxy):
+        proxy_key = f"{proxy['host']}:{proxy.get('port', 6053)}"
+        while True:
+            try:
+                logger.info(f"[PROXY] Connecting to BLE proxy at {proxy_key}...")
+                connection = APIConnection(
+                    proxy['host'],
+                    proxy.get('port', 6053),
+                    proxy.get('password', ''),
+                    "BLE Scanner Add-on"
+                )
+                await connection.connect()
+                logger.info(f"[PROXY] Connected to BLE proxy at {proxy_key}")
+                self.proxy_connections[proxy_key] = connection
+                async def handle_ble_advertisement(adv):
+                    await self.process_ble_advertisement(adv, proxy_key)
+                await connection.subscribe_ble_advertisements(handle_ble_advertisement)
+                while True:
+                    try:
+                        await asyncio.sleep(10)
+                        await connection.ping()
+                    except Exception as e:
+                        logger.error(f"[PROXY] Connection error for {proxy_key}: {e}")
+                        break
+            except Exception as e:
+                logger.error(f"[PROXY] Failed to connect to BLE proxy at {proxy_key}: {e}")
+                self.proxy_connections[proxy_key] = None
+            await asyncio.sleep(30)
+
+    async def process_ble_advertisement(self, data, proxy_key):
+        try:
+            mac_address = data.get('address', '').upper()
+            if not mac_address:
+                return
+            device_info = {
+                'mac_address': mac_address,
+                'name': data.get('name', 'Unknown Device'),
+                'rssi': data.get('rssi', 0),
+                'last_seen': datetime.now().isoformat(),
+                'manufacturer': data.get('manufacturer', 'Unknown'),
+                'services': data.get('services', []),
+                'proxy': proxy_key,
+                'seen_count': 1
+            }
+            if mac_address in self.devices:
+                existing = self.devices[mac_address]
+                device_info['seen_count'] = existing.get('seen_count', 0) + 1
+                if existing.get('added_manually'):
+                    device_info['name'] = existing['name']
+            self.devices[mac_address] = device_info
+            if len(self.devices) % 10 == 0:
+                self.save_devices()
+            if self.mqtt_client and self.mqtt_connected:
+                mqtt_message = {
+                    'mac_address': mac_address,
+                    'name': device_info['name'],
+                    'rssi': device_info['rssi'],
+                    'last_seen': device_info['last_seen'],
+                    'proxy': proxy_key,
+                    'seen_count': device_info['seen_count']
+                }
+                self.publish_mqtt("ble_scanner/data", mqtt_message)
+                if self.mqtt_discovery:
+                    device_topic = f"ble_scanner/data/devices/{mac_address.replace(':', '_')}"
+                    self.publish_mqtt(device_topic, mqtt_message)
+            logger.debug(f"[BLE] Discovered device: {mac_address} ({device_info['name']}) via {proxy_key}")
+        except Exception as e:
+            logger.error(f"[BLE] Error processing advertisement: {e}")
 
     def get_status(self):
         """Get add-on status"""
         return {
             'version': ADDON_VERSION,
-            'running': self.running,
+            'running': True,
             'mqtt_connected': self.mqtt_connected,
-            'devices_count': len(self.devices),
-            'scan_interval': self.scan_interval
+            'proxy_connections': {k: (v is not None) for k, v in self.proxy_connections.items()},
+            'total_proxies': len(self.bleProxies),
+            'devices_count': len(self.devices)
         }
 
     def get_devices(self):
@@ -649,6 +711,11 @@ HTML_TEMPLATE = """
                 <span>MQTT: <span id="mqtt-text">Unknown</span></span>
             </div>
             <div class="status-item">
+                <div class="status-indicator" id="proxy-status"></div>
+                <span>Proxies:</span>
+                <span id="proxy-list"></span>
+            </div>
+            <div class="status-item">
                 <span>Devices: <span id="devices-count">0</span></span>
             </div>
             <div class="status-item">
@@ -690,6 +757,13 @@ HTML_TEMPLATE = """
                 mqttText.textContent = 'Disconnected';
             }
             
+            // Update proxy status
+            const proxyStatus = document.getElementById('proxy-status');
+            const proxyList = document.getElementById('proxy-list');
+            proxyList.innerHTML = Object.entries(status.proxy_connections)
+                .map(([proxy, connected]) => `<span style='color:${connected ? '#28a745' : '#dc3545'}'>${proxy} ${connected ? '●' : '○'}</span>`)
+                .join(' ');
+            
             // Update devices count
             document.getElementById('devices-count').textContent = status.devices_count;
             document.getElementById('devices-count-header').textContent = `${status.devices_count} devices`;
@@ -727,6 +801,10 @@ HTML_TEMPLATE = """
                             <div class="info-item">
                                 <div class="info-label">Seen Count</div>
                                 <div class="info-value">${device.seen_count}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Proxy</div>
+                                <div class="info-value">${device.proxy || 'N/A'}</div>
                             </div>
                         </div>
                     </div>

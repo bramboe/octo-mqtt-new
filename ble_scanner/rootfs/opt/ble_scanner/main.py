@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.42"
+ADDON_VERSION = "1.0.43"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -206,7 +206,7 @@ class BLEScanner:
             topic = message.topic.value
             payload = message.payload.decode('utf-8')
             
-            logger.debug(f"[MQTT] Received message on {topic}: {payload}")
+            logger.info(f"[MQTT] Received message on {topic}: {payload}")
             
             # Parse the BLE advertisement data
             await self._process_ble_advertisement(topic, payload)
@@ -796,6 +796,7 @@ HTML_TEMPLATE = """
             <button class="btn btn-success" onclick="stopScan()">Stop Scan</button>
             <button class="btn btn-warning" onclick="clearDevices()">Clear Devices</button>
             <button class="btn btn-primary" onclick="testMqtt()">Test MQTT</button>
+            <button class="btn btn-primary" onclick="testEsp32()">Test ESP32</button>
             <a href="/api/diagnostic" class="btn btn-primary" target="_blank">Diagnostic</a>
         </div>
         
@@ -943,16 +944,45 @@ HTML_TEMPLATE = """
                     alert('MQTT Test: SUCCESS\n\n' + 
                           'MQTT Connected: ' + result.mqtt_connected + '\n' +
                           'MQTT Host: ' + result.mqtt_host + '\n' +
+                          'Scanning: ' + result.scanning + '\n' +
                           'Message: ' + result.message);
                 } else {
                     alert('MQTT Test: FAILED\n\n' + 
                           'MQTT Connected: ' + result.mqtt_connected + '\n' +
                           'MQTT Host: ' + result.mqtt_host + '\n' +
+                          'Scanning: ' + result.scanning + '\n' +
                           'Error: ' + result.message);
                 }
             } catch (error) {
                 console.error('Error testing MQTT:', error);
                 alert('MQTT Test: ERROR\n\n' + error.message);
+            }
+        }
+        
+        async function testEsp32() {
+            try {
+                const response = await fetch('/api/test/esp32', { method: 'POST' });
+                const result = await response.json();
+                
+                let message = 'ESP32 Test Results:\n\n';
+                message += 'Configured Proxies: ' + result.configured_proxies.length + '\n';
+                message += 'ESP32 Reachable: ' + result.esp32_reachable + '\n';
+                if (result.esp32_host) {
+                    message += 'ESP32 Host: ' + result.esp32_host + '\n';
+                }
+                message += 'MQTT Connected: ' + result.mqtt_connected + '\n';
+                message += 'MQTT Host: ' + result.mqtt_host + '\n';
+                message += 'Scanning: ' + result.scanning + '\n';
+                message += 'Subscribed Topics: ' + result.subscribed_topics.length + '\n';
+                
+                if (result.esp32_error) {
+                    message += '\nESP32 Error: ' + result.esp32_error;
+                }
+                
+                alert(message);
+            } catch (error) {
+                console.error('Error testing ESP32:', error);
+                alert('ESP32 Test: ERROR\n\n' + error.message);
             }
         }
         
@@ -1106,14 +1136,16 @@ def test_mqtt():
                 "status": "success",
                 "message": "MQTT test message published",
                 "mqtt_connected": scanner.mqtt_connected,
-                "mqtt_host": scanner.mqtt_host
+                "mqtt_host": scanner.mqtt_host,
+                "scanning": scanner.scanning
             })
         else:
             return jsonify({
                 "status": "error",
                 "message": "MQTT not connected",
                 "mqtt_connected": scanner.mqtt_connected,
-                "mqtt_host": scanner.mqtt_host
+                "mqtt_host": scanner.mqtt_host,
+                "scanning": scanner.scanning
             }), 500
             
     except Exception as e:
@@ -1122,7 +1154,68 @@ def test_mqtt():
             "status": "error",
             "message": str(e),
             "mqtt_connected": scanner.mqtt_connected,
-            "mqtt_host": scanner.mqtt_host
+            "mqtt_host": scanner.mqtt_host,
+            "scanning": scanner.scanning
+        }), 500
+
+@app.route('/api/test/esp32', methods=['POST'])
+def test_esp32():
+    """Test ESP32 BLE proxy configuration and MQTT topics"""
+    if scanner is None:
+        init_scanner()
+    
+    try:
+        # Check ESP32 configuration
+        esp32_config = {
+            "configured_proxies": scanner.bleProxies,
+            "mqtt_connected": scanner.mqtt_connected,
+            "mqtt_host": scanner.mqtt_host,
+            "scanning": scanner.scanning,
+            "subscribed_topics": [
+                "esphome/+/ble_advertise",
+                "ble_proxy/+/advertisement", 
+                "esp32_ble_proxy/+/data",
+                "ble_scanner/+/data",
+                "esphome/+/ble_advertise/+",
+                "esphome/+/ble_advertise/#",
+                "esphome/+/ble_advertise/+/+",
+                "esphome/+/ble_advertise/+/+/+"
+            ]
+        }
+        
+        # Test if ESP32 is reachable
+        if scanner.bleProxies:
+            proxy = scanner.bleProxies[0]
+            host = proxy.get('host', proxy.get('ip'))
+            port = proxy.get('port', 6053)
+            
+            try:
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex((host, port))
+                sock.close()
+                
+                if result == 0:
+                    esp32_config["esp32_reachable"] = True
+                    esp32_config["esp32_host"] = f"{host}:{port}"
+                else:
+                    esp32_config["esp32_reachable"] = False
+                    esp32_config["esp32_host"] = f"{host}:{port}"
+            except Exception as e:
+                esp32_config["esp32_reachable"] = False
+                esp32_config["esp32_error"] = str(e)
+        else:
+            esp32_config["esp32_reachable"] = False
+            esp32_config["esp32_error"] = "No ESP32 proxies configured"
+        
+        return jsonify(esp32_config)
+        
+    except Exception as e:
+        logger.error(f"[API] ESP32 test error: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
         }), 500
 
 @app.errorhandler(Exception)

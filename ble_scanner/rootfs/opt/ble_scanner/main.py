@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.38"
+ADDON_VERSION = "1.0.39"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -418,8 +418,10 @@ class BLEScanner:
             'running': True,
             'scanning': self.scanning,
             'mqtt_connected': self.mqtt_connected,
+            'mqtt_host': self.mqtt_host,
             'total_proxies': len(self.bleProxies),
-            'devices_count': len(self.devices)
+            'devices_count': len(self.devices),
+            'ble_proxies': self.bleProxies
         }
 
     def get_devices(self):
@@ -787,6 +789,7 @@ HTML_TEMPLATE = """
             <button class="btn btn-primary" onclick="startScan()">Start Scan</button>
             <button class="btn btn-success" onclick="stopScan()">Stop Scan</button>
             <button class="btn btn-warning" onclick="clearDevices()">Clear Devices</button>
+            <button class="btn btn-primary" onclick="testMqtt()">Test MQTT</button>
             <a href="/api/diagnostic" class="btn btn-primary" target="_blank">Diagnostic</a>
         </div>
         
@@ -914,6 +917,28 @@ HTML_TEMPLATE = """
             }
         }
         
+        async function testMqtt() {
+            try {
+                const response = await fetch('/api/test/mqtt', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    alert('MQTT Test: SUCCESS\n\n' + 
+                          'MQTT Connected: ' + result.mqtt_connected + '\n' +
+                          'MQTT Host: ' + result.mqtt_host + '\n' +
+                          'Message: ' + result.message);
+                } else {
+                    alert('MQTT Test: FAILED\n\n' + 
+                          'MQTT Connected: ' + result.mqtt_connected + '\n' +
+                          'MQTT Host: ' + result.mqtt_host + '\n' +
+                          'Error: ' + result.message);
+                }
+            } catch (error) {
+                console.error('Error testing MQTT:', error);
+                alert('MQTT Test: ERROR\n\n' + error.message);
+            }
+        }
+        
         // Initial load
         refreshData();
         
@@ -992,8 +1017,14 @@ def api_diagnostic():
             "mqtt_host": scanner.mqtt_host,
             "mqtt_port": scanner.mqtt_port,
             "mqtt_discovery_enabled": scanner.mqtt_discovery,
+            "ble_proxies": scanner.bleProxies,
         },
         "status": scanner.get_status(),
+        "mqtt_details": {
+            "connected": scanner.mqtt_connected,
+            "initialized": scanner.mqtt_initialized,
+            "client_exists": scanner.mqtt_client is not None,
+        }
     })
 
 @app.route('/api/devices/<mac_address>', methods=['POST'])
@@ -1032,6 +1063,50 @@ def remove_device(mac_address):
         scanner.save_devices()
         return jsonify({'message': 'Device removed'})
     return jsonify({'error': 'Device not found'}), 404
+
+@app.route('/api/test/mqtt', methods=['POST'])
+def test_mqtt():
+    """Test MQTT connection and publish a test message"""
+    if scanner is None:
+        init_scanner()
+    
+    try:
+        # Force MQTT setup if not already done
+        if not scanner.mqtt_initialized:
+            scanner.setup_mqtt()
+            time.sleep(2)  # Give it time to connect
+        
+        if scanner.mqtt_connected:
+            # Publish a test message
+            test_message = {
+                "test": True,
+                "timestamp": datetime.now().isoformat(),
+                "message": "BLE Scanner test message"
+            }
+            scanner.publish_mqtt("ble_scanner/test", test_message)
+            
+            return jsonify({
+                "status": "success",
+                "message": "MQTT test message published",
+                "mqtt_connected": scanner.mqtt_connected,
+                "mqtt_host": scanner.mqtt_host
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "MQTT not connected",
+                "mqtt_connected": scanner.mqtt_connected,
+                "mqtt_host": scanner.mqtt_host
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"[API] MQTT test error: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "mqtt_connected": scanner.mqtt_connected,
+            "mqtt_host": scanner.mqtt_host
+        }), 500
 
 @app.errorhandler(Exception)
 def handle_exception(e):

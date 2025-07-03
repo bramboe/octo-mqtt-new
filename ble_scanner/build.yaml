@@ -10,4 +10,4 @@ codenotary:
   signer: "notaryv2"
 labels:
   io.hass.type: addon
-  io.hass.version: "1.0.29" 
+  io.hass.version: "1.0.30" 

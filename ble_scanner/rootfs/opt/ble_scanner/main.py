@@ -19,7 +19,7 @@ from flask import Flask, jsonify, render_template, request, render_template_stri
 from flask_cors import CORS
 import threading
 import requests
-from aioesphomeapi import APIConnection, APIConnectionError
+from aioesphomeapi import APIConnection, APIConnectionError, ConnectionParams
 from asyncio_mqtt import Client as MqttClient
 import asyncio_mqtt
 
@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.24"
+ADDON_VERSION = "1.0.25"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -265,6 +265,9 @@ class BLEScanner:
                 if mqtt_user and mqtt_password:
                     logger.info("[MQTT] Found MQTT credentials from MQTT add-on config")
                     return mqtt_user, mqtt_password
+                else:
+                    logger.info("[MQTT] MQTT add-on config found but no credentials - trying no auth")
+                    return None, None
         except Exception as e:
             logger.debug(f"[MQTT] Error getting credentials from MQTT add-on: {e}")
         
@@ -361,13 +364,14 @@ class BLEScanner:
             try:
                 logger.info(f"[PROXY] Connecting to ESP32 proxy at {proxy_key}...")
                 
-                # Use ESPHome API connection
-                connection = APIConnection(
-                    proxy['host'],
-                    proxy.get('port', 6053),
-                    proxy.get('password', ''),
-                    None  # encryption_key (not used)
+                # Use ESPHome API connection with ConnectionParams
+                params = ConnectionParams(
+                    address=proxy['host'],
+                    port=proxy.get('port', 6053),
+                    password=proxy.get('password', ''),
+                    client_info="BLE Scanner Add-on"
                 )
+                connection = APIConnection(params)
                 
                 await connection.connect()
                 logger.info(f"[PROXY] Connected to ESP32 proxy at {proxy_key}")
@@ -505,13 +509,14 @@ class BLEScanner:
         try:
             logger.info(f"[TEST] Testing ESP32 proxy connection to {proxy_key}...")
             
-            # Try ESPHome API connection
-            connection = APIConnection(
-                proxy['host'],
-                proxy.get('port', 6053),
-                proxy.get('password', ''),
-                None  # encryption_key (not used)
+            # Try ESPHome API connection with ConnectionParams
+            params = ConnectionParams(
+                address=proxy['host'],
+                port=proxy.get('port', 6053),
+                password=proxy.get('password', ''),
+                client_info="BLE Scanner Add-on Test"
             )
+            connection = APIConnection(params)
             
             await connection.connect()
             await connection.ping()

@@ -50,10 +50,9 @@ class BLEScanner:
         # MQTT config
         self.mqtt_host = None
         self.mqtt_port = 1883
-        self.mqtt_user = None
+        self.mqtt_username = None
         self.mqtt_password = None
-        self.mqtt_topic = "ble_scanner/data"
-        self.mqtt_discovery_enabled = False
+        self.mqtt_discovery = False
         self.mqtt_client = None
         self.mqtt_connected = False
         # Proxy connection tracking
@@ -83,26 +82,16 @@ class BLEScanner:
                 self.esp32_proxies = config.get('esp32_proxies', [])
                 self.scan_interval = config.get('scan_interval', 30)
                 log_level = config.get('log_level', 'info')
-                # MQTT
-                self.mqtt_host = config.get('mqtt_host', None)
-                mqtt_port_config = config.get('mqtt_port', '1883')
-                # Handle auto_detect for port
-                if mqtt_port_config == '<auto_detect>' or mqtt_port_config == '<auto_detect>':
-                    self.mqtt_port = 1883  # Default MQTT port
-                else:
-                    try:
-                        self.mqtt_port = int(mqtt_port_config)
-                    except (ValueError, TypeError):
-                        logger.warning(f"[CONFIG] Invalid MQTT port '{mqtt_port_config}', using default 1883")
-                        self.mqtt_port = 1883
-                self.mqtt_user = config.get('mqtt_username', None)
-                self.mqtt_password = config.get('mqtt_password', None)
-                self.mqtt_topic = config.get('mqtt_topic', 'ble_scanner/data')
-                self.mqtt_discovery_enabled = config.get('mqtt_discovery', False)
+                # MQTT (smartbed-mqtt style)
+                self.mqtt_host = config.get('mqtt_host', '<auto_detect>')
+                self.mqtt_port = int(config.get('mqtt_port', 1883))
+                self.mqtt_username = config.get('mqtt_username', '')
+                self.mqtt_password = config.get('mqtt_password', '')
+                self.mqtt_discovery = config.get('mqtt_discovery', False)
                 # Set log level
                 if log_level == 'debug':
                     logging.getLogger().setLevel(logging.DEBUG)
-                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery_enabled}")
+                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery}")
             else:
                 logger.warning("[CONFIG] No configuration file found, using defaults")
         except Exception as e:
@@ -131,45 +120,31 @@ class BLEScanner:
         if self.mqtt_host == '<auto_detect>' or not self.mqtt_host:
             logger.info("[MQTT] Auto-detecting MQTT broker...")
             self.mqtt_host = self.auto_detect_mqtt_host()
-        
         if not self.mqtt_host:
             logger.info("[MQTT] Could not auto-detect MQTT broker, MQTT will be disabled.")
             self.mqtt_client = None
             return
-        
         # Handle auto-detection for MQTT credentials
-        if self.mqtt_user == '<auto_detect>' or not self.mqtt_user:
+        if self.mqtt_username == '<auto_detect>' or not self.mqtt_username:
             logger.info("[MQTT] Auto-detecting MQTT credentials...")
-            self.mqtt_user, self.mqtt_password = self.auto_detect_mqtt_credentials()
-        
+            self.mqtt_username, self.mqtt_password = self.auto_detect_mqtt_credentials()
         # Only create MQTT client if we have a host
         if not self.mqtt_host:
             logger.info("[MQTT] No MQTT host available, MQTT will be disabled.")
             self.mqtt_client = None
             return
-        
-        # Check if we have credentials
-        if self.mqtt_user is None and self.mqtt_password is None:
-            logger.info("[MQTT] No valid credentials found, MQTT will be disabled.")
-            self.mqtt_client = None
-            return
-        
         # Create MQTT client using asyncio-mqtt (smartbed-mqtt approach)
         try:
             mqtt_config = {
                 'hostname': self.mqtt_host,
                 'port': self.mqtt_port,
-                'username': self.mqtt_user,
+                'username': self.mqtt_username,
                 'password': self.mqtt_password,
                 'client_id': f"ble_scanner_{int(time.time())}"
             }
-            
             logger.info(f"[MQTT] Connecting to MQTT broker at {self.mqtt_host}:{self.mqtt_port}...")
             self.mqtt_client = MqttClient(**mqtt_config)
-            
-            # Start MQTT connection in background
             threading.Thread(target=self._run_mqtt_connect_loop, daemon=True).start()
-            
         except Exception as e:
             logger.error(f"[MQTT] Error setting up MQTT client: {e}")
             self.mqtt_client = None
@@ -253,7 +228,6 @@ class BLEScanner:
     def auto_detect_mqtt_credentials(self):
         """Auto-detect MQTT credentials using smartbed-mqtt approach"""
         logger.info("[MQTT] Auto-detecting MQTT credentials...")
-        
         # Try to get credentials from MQTT add-on config (most reliable)
         try:
             response = requests.get("http://supervisor/addons/core-mosquitto/config", timeout=5)
@@ -261,18 +235,14 @@ class BLEScanner:
                 config = response.json()
                 mqtt_user = config.get('username')
                 mqtt_password = config.get('password')
-                
                 if mqtt_user and mqtt_password:
                     logger.info("[MQTT] Found MQTT credentials from MQTT add-on config")
                     return mqtt_user, mqtt_password
                 else:
                     logger.info("[MQTT] MQTT add-on config found but no credentials - trying no auth")
-                    return None, None
-            else:
-                logger.debug(f"[MQTT] MQTT add-on config request failed with status {response.status_code}")
+                    return '', ''
         except Exception as e:
             logger.debug(f"[MQTT] Error getting credentials from MQTT add-on: {e}")
-        
         # Try to read from Home Assistant secrets
         secrets_path = "/config/secrets.yaml"
         if os.path.exists(secrets_path):
@@ -280,31 +250,45 @@ class BLEScanner:
                 import yaml
                 with open(secrets_path, 'r') as f:
                     secrets = yaml.safe_load(f)
-                
                 if secrets:
-                    # Look for MQTT credentials in secrets
                     mqtt_user = secrets.get('mqtt_username') or secrets.get('mqtt_user')
                     mqtt_password = secrets.get('mqtt_password') or secrets.get('mqtt_pass')
-                    
                     if mqtt_user and mqtt_password:
                         logger.info("[MQTT] Found MQTT credentials in secrets.yaml")
                         return mqtt_user, mqtt_password
-                        
             except Exception as e:
                 logger.debug(f"[MQTT] Error reading secrets.yaml: {e}")
-        
-        # Try common default credentials (start with no auth since many HA setups don't require it)
+        # Try no authentication first
+        try:
+            test_client = MqttClient(
+                hostname=self.mqtt_host,
+                port=self.mqtt_port,
+                username=None,
+                password=None,
+                client_id=f"ble_scanner_test_{int(time.time())}"
+            )
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(test_client.connect())
+                loop.run_until_complete(test_client.disconnect())
+                logger.info(f"[MQTT] Found working credentials: no auth")
+                return '', ''
+            except Exception:
+                pass
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.debug(f"[MQTT] Failed to test credentials no auth: {e}")
+        # Try common default credentials
         default_credentials = [
-            (None, None),  # No authentication (most common)
             ('homeassistant', 'homeassistant'),
             ('admin', 'admin'),
             ('mqtt', 'mqtt'),
             ('user', 'password')
         ]
-        
         for username, password in default_credentials:
             try:
-                # Test credentials by trying to connect
                 test_client = MqttClient(
                     hostname=self.mqtt_host,
                     port=self.mqtt_port,
@@ -312,26 +296,22 @@ class BLEScanner:
                     password=password,
                     client_id=f"ble_scanner_test_{int(time.time())}"
                 )
-                
-                # Try to connect
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
                     loop.run_until_complete(test_client.connect())
                     loop.run_until_complete(test_client.disconnect())
-                    logger.info(f"[MQTT] Found working credentials: {username or 'no auth'}")
+                    logger.info(f"[MQTT] Found working credentials: {username}")
                     return username, password
                 except Exception:
                     pass
                 finally:
                     loop.close()
-                    
             except Exception as e:
-                logger.debug(f"[MQTT] Failed to test credentials {username or 'no auth'}: {e}")
+                logger.debug(f"[MQTT] Failed to test credentials {username}: {e}")
                 continue
-        
         logger.warning("[MQTT] Could not auto-detect MQTT credentials")
-        return None, None
+        return '', ''
 
     async def test_mqtt_credentials(self, client):
         """Test MQTT credentials"""
@@ -454,7 +434,7 @@ class BLEScanner:
                 self.publish_mqtt(self.mqtt_topic, mqtt_message)
                 
                 # Publish to device-specific topic if discovery enabled
-                if self.mqtt_discovery_enabled:
+                if self.mqtt_discovery:
                     device_topic = f"{self.mqtt_topic}/devices/{mac_address.replace(':', '_')}"
                     self.publish_mqtt(device_topic, mqtt_message)
             
@@ -1073,7 +1053,7 @@ def api_diagnostic():
             "mqtt_host": scanner.mqtt_host,
             "mqtt_port": scanner.mqtt_port,
             "mqtt_topic": scanner.mqtt_topic,
-            "mqtt_discovery_enabled": scanner.mqtt_discovery_enabled,
+            "mqtt_discovery_enabled": scanner.mqtt_discovery,
             "esp32_proxies": scanner.esp32_proxies
         },
         "status": scanner.get_status(),

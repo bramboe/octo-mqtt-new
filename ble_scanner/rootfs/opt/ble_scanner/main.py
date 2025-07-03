@@ -17,10 +17,9 @@ import aiohttp
 import websockets
 from flask import Flask, jsonify, render_template, request, render_template_string
 from flask_cors import CORS
-import paho.mqtt.client as mqtt
 import threading
 import requests
-from aioesphomeapi import APIClient, APIConnectionError
+from aioesphomeapi import APIConnection, APIConnectionError
 from asyncio_mqtt import Client as MqttClient
 import asyncio_mqtt
 
@@ -31,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.19"
+ADDON_VERSION = "1.0.20"
 
 class BLEScanner:
     def __init__(self):
@@ -60,9 +59,6 @@ class BLEScanner:
         
         # Setup MQTT
         self.setup_mqtt()
-        
-        # Setup routes
-        self.setup_routes()
         
         # Start ESP32 proxy connections
         self.start_esp32_proxies()
@@ -107,115 +103,6 @@ class BLEScanner:
         except Exception as e:
             logger.error(f"[CONFIG] Error loading configuration: {e}")
     
-    def setup_routes(self):
-        """Setup Flask routes"""
-        
-        @self.app.route('/')
-        def index():
-            """Main web interface"""
-            return render_template_string(HTML_TEMPLATE)
-        
-        @self.app.route('/api/status')
-        def api_status():
-            """Get add-on status"""
-            return jsonify(self.get_status())
-        
-        @self.app.route('/api/devices')
-        def api_devices():
-            """Get discovered devices"""
-            return jsonify(self.get_devices())
-        
-        @self.app.route('/api/scan/start', methods=['POST'])
-        def api_start_scan():
-            """Start BLE scanning"""
-            return jsonify(self.start_scan())
-        
-        @self.app.route('/api/scan/stop', methods=['POST'])
-        def api_stop_scan():
-            """Stop BLE scanning"""
-            return jsonify(self.stop_scan())
-        
-        @self.app.route('/api/devices/clear', methods=['POST'])
-        def api_clear_devices():
-            """Clear all devices"""
-            return jsonify(self.clear_devices())
-        
-        @self.app.route('/api/diagnostic')
-        def api_diagnostic():
-            """Diagnostic endpoint"""
-            return jsonify({
-                "version": ADDON_VERSION,
-                "config": {
-                    "mqtt_host": self.mqtt_host,
-                    "mqtt_port": self.mqtt_port,
-                    "mqtt_topic": self.mqtt_topic,
-                    "mqtt_discovery_enabled": self.mqtt_discovery_enabled,
-                    "esp32_proxies": self.esp32_proxies
-                },
-                "status": self.get_status(),
-                "proxy_connections": self.proxy_connections
-            })
-        
-        @self.app.route('/api/devices/<mac_address>', methods=['POST'])
-        def add_device(mac_address):
-            logger.info("[API] /api/devices/<mac_address> called")
-            data = request.get_json()
-            if not data:
-                return jsonify({'error': 'No data provided'}), 400
-                
-            device = {
-                'mac_address': mac_address.upper(),
-                'name': data.get('name', 'Unknown Device'),
-                'rssi': data.get('rssi', 0),
-                'last_seen': datetime.now().isoformat(),
-                'manufacturer': data.get('manufacturer', 'Unknown'),
-                'services': data.get('services', []),
-                'added_manually': True
-            }
-            
-            self.devices[mac_address.upper()] = device
-            self.save_devices()
-            
-            return jsonify(device)
-        
-        @self.app.route('/api/devices/<mac_address>', methods=['DELETE'])
-        def remove_device(mac_address):
-            logger.info("[API] /api/devices/<mac_address> called")
-            if mac_address.upper() in self.devices:
-                del self.devices[mac_address.upper()]
-                self.save_devices()
-                return jsonify({'message': 'Device removed'})
-            return jsonify({'error': 'Device not found'}), 404
-        
-        @self.app.route('/api/test_proxy/<int:proxy_index>', methods=['GET'])
-        def test_proxy(proxy_index):
-            """Test ESP32 proxy connection"""
-            if proxy_index >= len(self.esp32_proxies):
-                return jsonify({'error': 'Invalid proxy index'}), 400
-            
-            proxy = self.esp32_proxies[proxy_index]
-            logger.info(f"[API] Testing proxy {proxy_index}: {proxy['host']}:{proxy.get('port', 6053)}")
-            
-            # Run test in background thread
-            def run_test():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    result = loop.run_until_complete(self.test_websocket_connection(proxy))
-                    logger.info(f"[API] Proxy test result: {result}")
-                except Exception as e:
-                    logger.error(f"[API] Proxy test error: {e}")
-                finally:
-                    loop.close()
-            
-            threading.Thread(target=run_test, daemon=True).start()
-            return jsonify({'message': 'Proxy test started', 'proxy': proxy})
-        
-        @self.app.errorhandler(Exception)
-        def handle_exception(e):
-            logger.error(f"[API] Unhandled exception: {e}")
-            return jsonify({'error': str(e)}), 500
-
     def save_devices(self):
         """Save devices to persistent storage"""
         try:
@@ -452,7 +339,7 @@ class BLEScanner:
         proxy_key = f"{host}:{port}"
         
         while self.running:
-            client = APIClient(host, port, password=password)
+            client = APIConnection(host, port, password=password)
             try:
                 await client.connect(login=True)
                 self.proxy_connections[proxy_key] = True
@@ -591,7 +478,7 @@ class BLEScanner:
         
         try:
             # Try ESPHome native API first
-            client = APIClient(host, port, password=password)
+            client = APIConnection(host, port, password=password)
             await client.connect(login=True)
             await client.disconnect()
             logger.info(f"[TEST] ESPHome API connection successful to {host}:{port}")
@@ -828,43 +715,120 @@ HTML_TEMPLATE = """
 if __name__ == '__main__':
     logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} initializing...")
     
+    # Create Flask app
+    app = Flask(__name__)
+
     # Create scanner instance
     scanner = BLEScanner()
-    
-    # Import and run with Gunicorn for production
-    import gunicorn.app.base
-    
-    class StandaloneApplication(gunicorn.app.base.BaseApplication):
-        def __init__(self, app, options=None):
-            self.options = options or {}
-            self.application = app
-            super().__init__()
+
+    @app.route('/')
+    def index():
+        """Main web interface"""
+        return render_template_string(HTML_TEMPLATE)
+
+    @app.route('/api/status')
+    def api_status():
+        """Get add-on status"""
+        return jsonify(scanner.get_status())
+
+    @app.route('/api/devices')
+    def api_devices():
+        """Get discovered devices"""
+        return jsonify(scanner.get_devices())
+
+    @app.route('/api/scan/start', methods=['POST'])
+    def api_start_scan():
+        """Start BLE scanning"""
+        return jsonify(scanner.start_scan())
+
+    @app.route('/api/scan/stop', methods=['POST'])
+    def api_stop_scan():
+        """Stop BLE scanning"""
+        return jsonify(scanner.stop_scan())
+
+    @app.route('/api/devices/clear', methods=['POST'])
+    def api_clear_devices():
+        """Clear all devices"""
+        return jsonify(scanner.clear_devices())
+
+    @app.route('/api/diagnostic')
+    def api_diagnostic():
+        """Diagnostic endpoint"""
+        return jsonify({
+            "version": ADDON_VERSION,
+            "config": {
+                "mqtt_host": scanner.mqtt_host,
+                "mqtt_port": scanner.mqtt_port,
+                "mqtt_topic": scanner.mqtt_topic,
+                "mqtt_discovery_enabled": scanner.mqtt_discovery_enabled,
+                "esp32_proxies": scanner.esp32_proxies
+            },
+            "status": scanner.get_status(),
+            "proxy_connections": scanner.proxy_connections
+        })
+
+    @app.route('/api/devices/<mac_address>', methods=['POST'])
+    def add_device(mac_address):
+        """Add a device manually"""
+        logger.info("[API] /api/devices/<mac_address> called")
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
+        device = {
+            'mac_address': mac_address.upper(),
+            'name': data.get('name', 'Unknown Device'),
+            'rssi': data.get('rssi', 0),
+            'last_seen': datetime.now().isoformat(),
+            'manufacturer': data.get('manufacturer', 'Unknown'),
+            'services': data.get('services', []),
+            'added_manually': True
+        }
         
-        def load_config(self):
-            config = {key: value for key, value in self.options.items()
-                     if key in self.cfg.settings and value is not None}
-            for key, value in config.items():
-                self.cfg.set(key.lower(), value)
+        scanner.devices[mac_address.upper()] = device
+        scanner.save_devices()
         
-        def load(self):
-            return self.application
-    
-    # Gunicorn configuration for production
-    options = {
-        'bind': '0.0.0.0:8099',
-        'workers': 1,  # Single worker for this add-on
-        'worker_class': 'sync',
-        'worker_connections': 1000,
-        'max_requests': 1000,
-        'max_requests_jitter': 50,
-        'timeout': 30,
-        'keepalive': 2,
-        'preload_app': True,
-        'access_logfile': '-',  # Log to stdout
-        'error_logfile': '-',   # Log to stderr
-        'loglevel': 'info',
-        'access_log_format': '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
-    }
-    
-    # Start Gunicorn server
-    StandaloneApplication(scanner.app, options).run() 
+        return jsonify(device)
+
+    @app.route('/api/devices/<mac_address>', methods=['DELETE'])
+    def remove_device(mac_address):
+        """Remove a device"""
+        logger.info("[API] /api/devices/<mac_address> called")
+        if mac_address.upper() in scanner.devices:
+            del scanner.devices[mac_address.upper()]
+            scanner.save_devices()
+            return jsonify({'message': 'Device removed'})
+        return jsonify({'error': 'Device not found'}), 404
+
+    @app.route('/api/test_proxy/<int:proxy_index>', methods=['GET'])
+    def test_proxy(proxy_index):
+        """Test ESP32 proxy connection"""
+        if proxy_index >= len(scanner.esp32_proxies):
+            return jsonify({'error': 'Invalid proxy index'}), 400
+        
+        proxy = scanner.esp32_proxies[proxy_index]
+        logger.info(f"[API] Testing proxy {proxy_index}: {proxy['host']}:{proxy.get('port', 6053)}")
+        
+        # Run test in background thread
+        def run_test():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(scanner.test_websocket_connection(proxy))
+                logger.info(f"[API] Proxy test result: {result}")
+            except Exception as e:
+                logger.error(f"[API] Proxy test error: {e}")
+            finally:
+                loop.close()
+        
+        threading.Thread(target=run_test, daemon=True).start()
+        return jsonify({'message': 'Proxy test started', 'proxy': proxy})
+
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        """Handle unhandled exceptions"""
+        logger.error(f"[API] Unhandled exception: {e}")
+        return jsonify({'error': str(e)}), 500
+
+    # For development only - use Gunicorn in production
+    app.run(host='0.0.0.0', port=8099, debug=False) 

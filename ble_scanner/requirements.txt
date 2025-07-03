@@ -5,5 +5,5 @@ aiohttp==3.8.6
 asyncio-mqtt==0.16.1
 requests==2.31.0
 python-dotenv==1.0.0
-aioesphomeapi==1.0.0
+aioesphomeapi==32.2.3
 gunicorn==21.2.0 

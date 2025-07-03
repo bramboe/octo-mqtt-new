@@ -10,15 +10,15 @@ ARG BUILD_ARCH=amd64
 # Install dependencies
 RUN \
     apk add --no-cache \
-        bluez \
-        bluez-dev \
         python3 \
         py3-pip \
         git \
-        gcc \
     \
     && pip3 install --no-cache-dir --upgrade pip \
     && rm -rf /var/cache/apk/*
+
+# Set working directory
+WORKDIR /opt/ble_scanner
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt /
@@ -26,6 +26,11 @@ RUN pip3 install --no-cache-dir -r /requirements.txt
 
 # Copy root filesystem
 COPY rootfs /
+
+# Make scripts executable
+RUN chmod +x /etc/cont-init.d/ble-scanner.sh \
+    && chmod +x /etc/services.d/ble-scanner/run \
+    && chmod +x /etc/services.d/ble-scanner/finish
 
 # Build arguments
 ARG BUILD_ARCH
@@ -46,7 +51,7 @@ LABEL \
     org.opencontainers.image.title="${BUILD_NAME}" \
     org.opencontainers.image.description="${BUILD_DESCRIPTION}" \
     org.opencontainers.image.vendor="Home Assistant Community Add-ons" \
-    org.opencontainers.image.authors="Your Name <your.email@example.com>" \
+    org.opencontainers.image.authors="Bram Boersma" \
     org.opencontainers.image.licenses="MIT" \
     org.opencontainers.image.url="https://addons.community" \
     org.opencontainers.image.source="https://github.com/${BUILD_REPOSITORY}" \

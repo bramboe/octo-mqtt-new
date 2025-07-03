@@ -21,6 +21,7 @@ import threading
 import requests
 from asyncio_mqtt import Client as MqttClient
 import asyncio_mqtt
+import aioesphomeapi
 
 # Configure logging
 logging.basicConfig(
@@ -29,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.39"
+ADDON_VERSION = "1.0.40"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -63,6 +64,9 @@ class BLEScanner:
         self.mqtt_client = None
         self.mqtt_connected = False
         self.mqtt_initialized = False
+        # ESP32 proxy connections
+        self.esp32_connections = {}
+        self.esp32_scanning = False
         # Load configuration
         self.load_config()
         # MQTT will be setup after Flask app starts
@@ -420,8 +424,10 @@ class BLEScanner:
             'mqtt_connected': self.mqtt_connected,
             'mqtt_host': self.mqtt_host,
             'total_proxies': len(self.bleProxies),
+            'esp32_connected': len(self.esp32_connections),
             'devices_count': len(self.devices),
-            'ble_proxies': self.bleProxies
+            'ble_proxies': self.bleProxies,
+            'esp32_connections': list(self.esp32_connections.keys())
         }
 
     def get_devices(self):
@@ -432,7 +438,10 @@ class BLEScanner:
         """Start BLE scanning"""
         if not self.scanning:
             self.scanning = True
-            logger.info("[SCAN] BLE scanning started - listening for MQTT advertisements")
+            logger.info("[SCAN] BLE scanning started")
+            
+            # Start ESP32 proxy connections
+            self._start_esp32_scanning()
             
             # Publish scan start message
             if self.mqtt_connected:
@@ -441,15 +450,116 @@ class BLEScanner:
                     "timestamp": datetime.now().isoformat()
                 })
             
-            return {'status': 'started', 'message': 'Listening for BLE advertisements via MQTT'}
+            return {'status': 'started', 'message': 'BLE scanning started - connecting to ESP32 proxies and listening for MQTT advertisements'}
         else:
             return {'status': 'already_running', 'message': 'Scanning already in progress'}
+
+    def _start_esp32_scanning(self):
+        """Start scanning via ESP32 BLE proxies"""
+        if self.esp32_scanning:
+            return
+            
+        self.esp32_scanning = True
+        logger.info("[ESP32] Starting ESP32 BLE proxy scanning...")
+        
+        # Connect to each configured ESP32 proxy
+        for proxy in self.bleProxies:
+            try:
+                host = proxy.get('host', proxy.get('ip'))
+                port = proxy.get('port', 6053)
+                password = proxy.get('password', '')
+                
+                if host and port:
+                    logger.info(f"[ESP32] Connecting to ESP32 proxy at {host}:{port}")
+                    threading.Thread(
+                        target=self._connect_esp32_proxy,
+                        args=(host, port, password),
+                        daemon=True
+                    ).start()
+                    
+            except Exception as e:
+                logger.error(f"[ESP32] Error setting up ESP32 proxy connection: {e}")
+
+    def _connect_esp32_proxy(self, host, port, password):
+        """Connect to ESP32 BLE proxy and listen for advertisements"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            loop.run_until_complete(self._esp32_connection_loop(host, port, password))
+        except Exception as e:
+            logger.error(f"[ESP32] Error in ESP32 connection loop for {host}:{port}: {e}")
+        finally:
+            loop.close()
+
+    async def _esp32_connection_loop(self, host, port, password):
+        """ESP32 connection loop"""
+        connection_key = f"{host}:{port}"
+        
+        while self.running and self.esp32_scanning:
+            try:
+                # Create ESPHome API connection
+                cli = aioesphomeapi.APIClient(host, port, password)
+                await cli.connect()
+                
+                logger.info(f"[ESP32] Connected to ESP32 proxy at {host}:{port}")
+                self.esp32_connections[connection_key] = cli
+                
+                # Subscribe to BLE advertisements
+                await cli.subscribe_bluetooth_le_advertisements()
+                
+                # Listen for BLE advertisements
+                async for msg in cli.bluetooth_le_advertisements():
+                    if not self.running or not self.esp32_scanning:
+                        break
+                        
+                    await self._process_esp32_ble_advertisement(msg, host)
+                    
+            except Exception as e:
+                logger.error(f"[ESP32] Connection error for {host}:{port}: {e}")
+                if connection_key in self.esp32_connections:
+                    del self.esp32_connections[connection_key]
+                
+                # Wait before retrying
+                await asyncio.sleep(10)
+
+    async def _process_esp32_ble_advertisement(self, msg, proxy_host):
+        """Process BLE advertisement from ESP32 proxy"""
+        try:
+            # Extract device information from ESPHome API message
+            device_info = {
+                'mac_address': msg.address.hex().upper(),
+                'name': msg.name or f"BLE Device {msg.address.hex()[-6:].upper()}",
+                'rssi': msg.rssi,
+                'last_seen': datetime.now().isoformat(),
+                'manufacturer': 'Unknown',
+                'services': [],
+                'source': f'esp32_proxy_{proxy_host}'
+            }
+            
+            # Add or update device
+            mac_address = device_info['mac_address']
+            self.devices[mac_address] = device_info
+            self.save_devices()
+            
+            logger.info(f"[ESP32] Discovered device: {device_info['name']} ({mac_address}) via {proxy_host}")
+            
+            # Publish to MQTT if discovery is enabled
+            if self.mqtt_discovery and self.mqtt_connected:
+                self.publish_mqtt(f"ble_scanner/discovered/{mac_address}", device_info)
+                
+        except Exception as e:
+            logger.error(f"[ESP32] Error processing BLE advertisement: {e}")
 
     def stop_scan(self):
         """Stop BLE scanning"""
         if self.scanning:
             self.scanning = False
+            self.esp32_scanning = False
             logger.info("[SCAN] BLE scanning stopped")
+            
+            # Close ESP32 connections
+            self._stop_esp32_connections()
             
             # Publish scan stop message
             if self.mqtt_connected:
@@ -461,6 +571,17 @@ class BLEScanner:
             return {'status': 'stopped', 'message': 'BLE scanning stopped'}
         else:
             return {'status': 'not_running', 'message': 'Scanning was not running'}
+
+    def _stop_esp32_connections(self):
+        """Stop all ESP32 proxy connections"""
+        logger.info("[ESP32] Stopping ESP32 proxy connections...")
+        for connection_key, cli in self.esp32_connections.items():
+            try:
+                asyncio.create_task(cli.disconnect())
+                logger.info(f"[ESP32] Disconnected from {connection_key}")
+            except Exception as e:
+                logger.error(f"[ESP32] Error disconnecting from {connection_key}: {e}")
+        self.esp32_connections.clear()
 
     def clear_devices(self):
         """Clear all devices"""
@@ -774,7 +895,7 @@ HTML_TEMPLATE = """
             </div>
             <div class="status-item">
                 <div class="status-indicator" id="proxy-status"></div>
-                <span>Proxies:</span>
+                <span>ESP32 Proxies:</span>
                 <span id="proxy-list"></span>
             </div>
             <div class="status-item">
@@ -829,6 +950,17 @@ HTML_TEMPLATE = """
             } else {
                 scanStatus.className = 'status-indicator';
                 scanText.textContent = 'Stopped';
+            }
+            
+            // Update ESP32 proxy status
+            const proxyStatus = document.getElementById('proxy-status');
+            const proxyList = document.getElementById('proxy-list');
+            if (status.esp32_connected > 0) {
+                proxyStatus.className = 'status-indicator online';
+                proxyList.textContent = `${status.esp32_connected}/${status.total_proxies} connected`;
+            } else {
+                proxyStatus.className = 'status-indicator';
+                proxyList.textContent = `${status.total_proxies} configured`;
             }
             
             // Update devices count

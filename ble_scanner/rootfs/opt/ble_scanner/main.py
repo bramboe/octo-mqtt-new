@@ -104,7 +104,7 @@ class BLEScanner:
                 json.dump(self.devices, f)
         except Exception as e:
             logger.error(f"Error saving devices: {e}")
-
+    
     def load_devices(self):
         """Load devices from persistent storage"""
         try:
@@ -113,7 +113,7 @@ class BLEScanner:
                     self.devices = json.load(f)
         except Exception as e:
             logger.error(f"Error loading devices: {e}")
-
+    
     def setup_mqtt(self):
         """Setup MQTT client using smartbed-mqtt approach"""
         # Handle auto-detection for MQTT host
@@ -148,7 +148,7 @@ class BLEScanner:
         except Exception as e:
             logger.error(f"[MQTT] Error setting up MQTT client: {e}")
             self.mqtt_client = None
-
+    
     def _run_mqtt_connect_loop(self):
         """Run MQTT connection loop in background thread"""
         loop = asyncio.new_event_loop()
@@ -165,7 +165,7 @@ class BLEScanner:
         while self.running:
             try:
                 await self.mqtt_client.connect()
-                self.mqtt_connected = True
+            self.mqtt_connected = True
                 logger.info("[MQTT] Connected to MQTT broker")
                 
                 # Keep connection alive
@@ -238,9 +238,8 @@ class BLEScanner:
                 if mqtt_user and mqtt_password:
                     logger.info("[MQTT] Found MQTT credentials from MQTT add-on config")
                     return mqtt_user, mqtt_password
-                else:
-                    logger.info("[MQTT] MQTT add-on config found but no credentials - trying no auth")
-                    return '', ''
+                logger.info("[MQTT] MQTT add-on config found but no credentials - trying no auth")
+                return '', ''
         except Exception as e:
             logger.debug(f"[MQTT] Error getting credentials from MQTT add-on: {e}")
         # Try to read from Home Assistant secrets
@@ -337,52 +336,35 @@ class BLEScanner:
             logger.error(f"[PROXY] Error in ESP32 proxy connection: {e}")
         finally:
             loop.close()
-
+    
     async def connect_esp32_proxy(self, proxy):
         """Connect to ESP32 BLE proxy using ESPHome API"""
         proxy_key = f"{proxy['host']}:{proxy.get('port', 6053)}"
-        
         while self.running:
             try:
                 logger.info(f"[PROXY] Connecting to ESP32 proxy at {proxy_key}...")
-                
-                # Use ESPHome API connection with proper parameters
                 connection = APIConnection(
-                    address=proxy['host'],
-                    port=proxy.get('port', 6053),
-                    password=proxy.get('password', ''),
-                    client_info="BLE Scanner Add-on"
+                    proxy['host'],
+                    proxy.get('port', 6053),
+                    proxy.get('password', ''),
+                    "BLE Scanner Add-on"
                 )
-                
                 await connection.connect()
                 logger.info(f"[PROXY] Connected to ESP32 proxy at {proxy_key}")
-                
-                # Store connection
                 self.proxy_connections[proxy_key] = connection
-                
-                # Subscribe to BLE advertisements
                 async def handle_ble_advertisement(adv):
-                    # adv is a dict with keys like 'address', 'name', 'rssi', etc.
                     await self.process_ble_advertisement(adv, proxy_key)
-                
-                # Subscribe to BLE advertisements
                 await connection.subscribe_ble_advertisements(handle_ble_advertisement)
-                
-                # Keep connection alive
                 while self.running:
                     try:
                         await asyncio.sleep(10)
-                        # Ping to keep connection alive
                         await connection.ping()
                     except Exception as e:
                         logger.error(f"[PROXY] Connection error for {proxy_key}: {e}")
                         break
-                        
             except Exception as e:
                 logger.error(f"[PROXY] Failed to connect to ESP32 proxy at {proxy_key}: {e}")
                 self.proxy_connections[proxy_key] = None
-                
-            # Wait before retrying
             if self.running:
                 await asyncio.sleep(30)
 
@@ -391,8 +373,8 @@ class BLEScanner:
         try:
             # Extract device information
             mac_address = data.get('address', '').upper()
-            if not mac_address:
-                return
+                if not mac_address:
+                    return
                 
             device_info = {
                 'mac_address': mac_address,
@@ -486,25 +468,19 @@ class BLEScanner:
     async def test_websocket_connection(self, proxy):
         """Test ESP32 proxy connection"""
         proxy_key = f"{proxy['host']}:{proxy.get('port', 6053)}"
-        
         try:
             logger.info(f"[TEST] Testing ESP32 proxy connection to {proxy_key}...")
-            
-            # Try ESPHome API connection with proper parameters
             connection = APIConnection(
-                address=proxy['host'],
-                port=proxy.get('port', 6053),
-                password=proxy.get('password', ''),
-                client_info="BLE Scanner Add-on Test"
+                proxy['host'],
+                proxy.get('port', 6053),
+                proxy.get('password', ''),
+                "BLE Scanner Add-on Test"
             )
-            
             await connection.connect()
             await connection.ping()
             await connection.disconnect()
-            
             logger.info(f"[TEST] ESP32 proxy connection test successful for {proxy_key}")
             return {'status': 'success', 'method': 'esphome_api', 'proxy': proxy_key}
-            
         except Exception as e:
             logger.error(f"[TEST] ESP32 proxy connection test failed for {proxy_key}: {e}")
             return {'status': 'failed', 'error': str(e), 'proxy': proxy_key}

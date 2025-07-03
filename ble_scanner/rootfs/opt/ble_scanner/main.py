@@ -30,13 +30,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.20"
+ADDON_VERSION = "1.0.21"
+
+# Create Flask app at module level for Gunicorn
+app = Flask(__name__)
+CORS(app)
+
+# Global scanner instance
+scanner = None
 
 class BLEScanner:
     def __init__(self):
         logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} initializing...")
-        self.app = Flask(__name__)
-        CORS(self.app)
         self.devices = {}
         self.esp32_proxies = []
         self.scan_interval = 30
@@ -184,139 +189,161 @@ class BLEScanner:
         """MQTT connection loop using smartbed-mqtt approach"""
         while self.running:
             try:
-                async with self.mqtt_client as client:
-                    self.mqtt_connected = True
-                    logger.info("[MQTT] Connected to MQTT broker")
+                await self.mqtt_client.connect()
+                self.mqtt_connected = True
+                logger.info("[MQTT] Connected to MQTT broker")
+                
+                # Keep connection alive
+                while self.running:
+                    await asyncio.sleep(10)
                     
-                    # Keep connection alive
-                    while self.running:
-                        await asyncio.sleep(10)
-                        
             except Exception as e:
                 self.mqtt_connected = False
                 logger.error(f"[MQTT] Connection error: {e}")
                 await asyncio.sleep(10)  # Wait before retrying
 
     def publish_mqtt(self, topic, message):
-        """Publish message to MQTT using smartbed-mqtt approach"""
-        if not self.mqtt_client or not self.mqtt_connected:
-            return
-        
-        try:
-            if isinstance(message, dict):
-                message = json.dumps(message)
-            
-            # Run async publish in background
-            asyncio.create_task(self._async_publish_mqtt(topic, message))
-            
-        except Exception as e:
-            logger.error(f"[MQTT] Error publishing to {topic}: {e}")
+        """Publish message to MQTT (thread-safe wrapper)"""
+        if self.mqtt_client and self.mqtt_connected:
+            threading.Thread(target=self._async_publish_mqtt, args=(topic, message), daemon=True).start()
 
     async def _async_publish_mqtt(self, topic, message):
         """Async MQTT publish"""
         try:
-            await self.mqtt_client.publish(topic, message, qos=1)
-            logger.debug(f"[MQTT] Published to {topic}: {message}")
+            await self.mqtt_client.connect()
+            await self.mqtt_client.publish(topic, json.dumps(message))
+            await self.mqtt_client.disconnect()
         except Exception as e:
-            logger.error(f"[MQTT] Error in async publish to {topic}: {e}")
+            logger.error(f"[MQTT] Error publishing: {e}")
 
     def auto_detect_mqtt_host(self):
-        """Auto-detect MQTT broker host"""
-        # Try to detect Home Assistant MQTT add-on
-        try:
-            response = requests.get("http://supervisor/addons", timeout=5)
-            if response.status_code == 200:
-                addons = response.json()
-                for addon in addons.get('data', {}).get('addons', []):
-                    if addon.get('slug') == 'core-mosquitto':
-                        return 'core-mosquitto'
-        except Exception as e:
-            logger.debug(f"[MQTT] Auto-detection failed: {e}")
+        """Auto-detect MQTT broker host using smartbed-mqtt approach"""
+        logger.info("[MQTT] Auto-detecting MQTT broker...")
         
-        # Fallback to common MQTT hosts
-        common_hosts = ['core-mosquitto', 'mosquitto', 'localhost', '192.168.1.1']
-        for host in common_hosts:
+        # Try common MQTT broker hostnames
+        possible_hosts = [
+            'core-mosquitto',  # Home Assistant MQTT add-on
+            'mosquitto',       # Alternative name
+            'mqtt',           # Generic MQTT service
+            'localhost',      # Local MQTT
+            '127.0.0.1'       # Local MQTT IP
+        ]
+        
+        for host in possible_hosts:
             try:
-                # Try to connect to test if host is reachable
+                logger.info(f"[MQTT] Trying to connect to {host}:{self.mqtt_port}...")
+                # Try to connect to MQTT broker
                 import socket
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2)
-                result = sock.connect_ex((host, 1883))
+                sock.settimeout(5)
+                result = sock.connect_ex((host, self.mqtt_port))
                 sock.close()
+                
                 if result == 0:
-                    logger.info(f"[MQTT] Auto-detected MQTT host: {host}")
+                    logger.info(f"[MQTT] Found MQTT broker at {host}:{self.mqtt_port}")
                     return host
-            except Exception:
+                    
+            except Exception as e:
+                logger.debug(f"[MQTT] Failed to connect to {host}: {e}")
                 continue
         
+        logger.warning("[MQTT] Could not auto-detect MQTT broker")
         return None
 
     def auto_detect_mqtt_credentials(self):
-        """Auto-detect MQTT credentials"""
-        # Try to get credentials from Home Assistant configuration
-        try:
-            response = requests.get("http://supervisor/addons/core-mosquitto/config", timeout=5)
-            if response.status_code == 200:
-                config = response.json()
-                return config.get('username'), config.get('password')
-        except Exception as e:
-            logger.debug(f"[MQTT] Credential auto-detection failed: {e}")
+        """Auto-detect MQTT credentials using smartbed-mqtt approach"""
+        logger.info("[MQTT] Auto-detecting MQTT credentials...")
         
-        # Try to get from Home Assistant core config
-        try:
-            response = requests.get("http://supervisor/core/api/config", timeout=5)
-            if response.status_code == 200:
-                config = response.json()
-                mqtt_config = config.get('mqtt', {})
-                return mqtt_config.get('username'), mqtt_config.get('password')
-        except Exception as e:
-            logger.debug(f"[MQTT] Core config auto-detection failed: {e}")
+        # Try to read from Home Assistant secrets
+        secrets_path = "/config/secrets.yaml"
+        if os.path.exists(secrets_path):
+            try:
+                import yaml
+                with open(secrets_path, 'r') as f:
+                    secrets = yaml.safe_load(f)
+                
+                if secrets:
+                    # Look for MQTT credentials in secrets
+                    mqtt_user = secrets.get('mqtt_username') or secrets.get('mqtt_user')
+                    mqtt_password = secrets.get('mqtt_password') or secrets.get('mqtt_pass')
+                    
+                    if mqtt_user and mqtt_password:
+                        logger.info("[MQTT] Found MQTT credentials in secrets.yaml")
+                        return mqtt_user, mqtt_password
+                        
+            except Exception as e:
+                logger.debug(f"[MQTT] Error reading secrets.yaml: {e}")
+        
+        # Try to read from configuration.yaml
+        config_path = "/config/configuration.yaml"
+        if os.path.exists(config_path):
+            try:
+                import yaml
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                if config and 'mqtt' in config:
+                    mqtt_config = config['mqtt']
+                    mqtt_user = mqtt_config.get('username') or mqtt_config.get('user')
+                    mqtt_password = mqtt_config.get('password') or mqtt_config.get('pass')
+                    
+                    if mqtt_user and mqtt_password:
+                        logger.info("[MQTT] Found MQTT credentials in configuration.yaml")
+                        return mqtt_user, mqtt_password
+                        
+            except Exception as e:
+                logger.debug(f"[MQTT] Error reading configuration.yaml: {e}")
         
         # Try common default credentials
-        common_credentials = [
-            (None, None),  # No auth
+        default_credentials = [
             ('homeassistant', 'homeassistant'),
             ('admin', 'admin'),
             ('mqtt', 'mqtt'),
+            ('user', 'password')
         ]
         
-        for username, password in common_credentials:
+        for username, password in default_credentials:
             try:
-                # Test connection with these credentials
+                # Test credentials by trying to connect
                 test_client = MqttClient(
                     hostname=self.mqtt_host,
                     port=self.mqtt_port,
                     username=username,
                     password=password,
-                    client_id=f"test_{int(time.time())}"
+                    client_id=f"ble_scanner_test_{int(time.time())}"
                 )
                 
                 # Try to connect
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    loop.run_until_complete(self.test_mqtt_credentials(test_client))
-                    logger.info(f"[MQTT] Auto-detected working credentials: {username}")
+                    loop.run_until_complete(test_client.connect())
+                    loop.run_until_complete(test_client.disconnect())
+                    logger.info(f"[MQTT] Found working credentials: {username}")
                     return username, password
+                except Exception:
+                    pass
                 finally:
                     loop.close()
-                
+                    
             except Exception as e:
-                logger.debug(f"[MQTT] Credential test failed for {username}: {e}")
+                logger.debug(f"[MQTT] Failed to test credentials {username}: {e}")
                 continue
         
+        logger.warning("[MQTT] Could not auto-detect MQTT credentials")
         return None, None
 
     async def test_mqtt_credentials(self, client):
         """Test MQTT credentials"""
         try:
-            async with client:
-                await asyncio.sleep(1)  # Brief connection test
+            await client.connect()
+            await client.disconnect()
+            return True
         except Exception:
-            raise
+            return False
 
     def start_esp32_proxies(self):
-        """Start ESP32 proxy connection tasks"""
+        """Start ESP32 proxy connections"""
         for proxy in self.esp32_proxies:
             threading.Thread(target=self._run_esp32_proxy, args=(proxy,), daemon=True).start()
 
@@ -327,309 +354,584 @@ class BLEScanner:
         try:
             loop.run_until_complete(self.connect_esp32_proxy(proxy))
         except Exception as e:
-            logger.error(f"[BLEPROXY] Error in ESP32 proxy thread: {e}")
+            logger.error(f"[PROXY] Error in ESP32 proxy connection: {e}")
         finally:
             loop.close()
 
     async def connect_esp32_proxy(self, proxy):
-        """Robust ESPHome BLE proxy connection loop, smartbed-mqtt style."""
-        host = proxy['host']
-        port = proxy.get('port', 6053)
-        password = proxy.get('password', '')
-        proxy_key = f"{host}:{port}"
+        """Connect to ESP32 BLE proxy using ESPHome API"""
+        proxy_key = f"{proxy['host']}:{proxy.get('port', 6053)}"
         
         while self.running:
-            client = APIConnection(host, port, password=password)
             try:
-                await client.connect(login=True)
-                self.proxy_connections[proxy_key] = True
-                logger.info(f"[BLEPROXY] Connected to ESPHome BLE proxy at {host}:{port}")
-
+                logger.info(f"[PROXY] Connecting to ESP32 proxy at {proxy_key}...")
+                
+                # Use ESPHome API connection
+                connection = APIConnection(
+                    proxy['host'],
+                    proxy.get('port', 6053),
+                    proxy.get('password', ''),
+                    client_info="BLE Scanner Add-on"
+                )
+                
+                await connection.connect()
+                logger.info(f"[PROXY] Connected to ESP32 proxy at {proxy_key}")
+                
+                # Store connection
+                self.proxy_connections[proxy_key] = connection
+                
+                # Subscribe to BLE advertisements
                 async def handle_ble_advertisement(adv):
                     # adv is a dict with keys like 'address', 'name', 'rssi', etc.
-                    adv_dict = {
-                        'address': adv.get('address'),
-                        'name': adv.get('name', 'Unknown Device'),
-                        'rssi': adv.get('rssi'),
-                        'manufacturer_data': adv.get('manufacturer_data', {}),
-                        'service_uuids': adv.get('service_uuids', []),
-                    }
-                    await self.process_ble_advertisement({'bluetooth_le_advertisement': adv_dict}, proxy_key)
-
-                await client.subscribe_bluetooth_le_advertisements(handle_ble_advertisement)
-                logger.info(f"[BLEPROXY] Subscribed to BLE advertisements on {host}:{port}")
+                    await self.process_ble_advertisement(adv, proxy_key)
                 
-                # Keep the connection open while running
+                # Subscribe to BLE advertisements
+                await connection.subscribe_ble_advertisements(handle_ble_advertisement)
+                
+                # Keep connection alive
                 while self.running:
-                    await asyncio.sleep(10)
-                    
-                await client.disconnect()
-                self.proxy_connections[proxy_key] = False
-                logger.info(f"[BLEPROXY] Disconnected from ESPHome BLE proxy at {host}:{port}")
-                
-            except APIConnectionError as e:
-                self.proxy_connections[proxy_key] = False
-                logger.error(f"[BLEPROXY] ESPHome API connection error: {e}")
-                await asyncio.sleep(10)  # Wait before retrying
+                    try:
+                        await asyncio.sleep(10)
+                        # Ping to keep connection alive
+                        await connection.ping()
+                    except Exception as e:
+                        logger.error(f"[PROXY] Connection error for {proxy_key}: {e}")
+                        break
+                        
             except Exception as e:
-                self.proxy_connections[proxy_key] = False
-                logger.error(f"[BLEPROXY] Error connecting to ESPHome BLE proxy at {host}:{port}: {e}")
-                await asyncio.sleep(10)  # Wait before retrying
+                logger.error(f"[PROXY] Failed to connect to ESP32 proxy at {proxy_key}: {e}")
+                self.proxy_connections[proxy_key] = None
+                
+            # Wait before retrying
+            if self.running:
+                await asyncio.sleep(30)
 
     async def process_ble_advertisement(self, data, proxy_key):
         """Process BLE advertisement data"""
         try:
-            adv = data.get('bluetooth_le_advertisement', {})
-            address = adv.get('address')
-            name = adv.get('name', 'Unknown Device')
-            rssi = adv.get('rssi', 0)
-            
-            if not address:
+            # Extract device information
+            mac_address = data.get('address', '').upper()
+            if not mac_address:
                 return
+                
+            device_info = {
+                'mac_address': mac_address,
+                'name': data.get('name', 'Unknown Device'),
+                'rssi': data.get('rssi', 0),
+                'last_seen': datetime.now().isoformat(),
+                'manufacturer': data.get('manufacturer', 'Unknown'),
+                'services': data.get('services', []),
+                'proxy': proxy_key,
+                'seen_count': 1
+            }
             
-            # Update device data
-            device_key = address.lower()
-            if device_key not in self.devices:
-                self.devices[device_key] = {
-                    'address': address,
-                    'name': name,
-                    'first_seen': datetime.now().isoformat(),
-                    'last_seen': datetime.now().isoformat(),
-                    'rssi': rssi,
-                    'proxy': proxy_key,
-                    'manufacturer_data': adv.get('manufacturer_data', {}),
-                    'service_uuids': adv.get('service_uuids', []),
-                    'seen_count': 1
-                }
-            else:
-                self.devices[device_key].update({
-                    'last_seen': datetime.now().isoformat(),
-                    'rssi': rssi,
-                    'proxy': proxy_key,
-                    'manufacturer_data': adv.get('manufacturer_data', {}),
-                    'service_uuids': adv.get('service_uuids', []),
-                    'seen_count': self.devices[device_key].get('seen_count', 0) + 1
-                })
+            # Update or add device
+            if mac_address in self.devices:
+                existing = self.devices[mac_address]
+                device_info['seen_count'] = existing.get('seen_count', 0) + 1
+                # Keep the original name if it was manually added
+                if existing.get('added_manually'):
+                    device_info['name'] = existing['name']
+            
+            self.devices[mac_address] = device_info
+            
+            # Save devices periodically
+            if len(self.devices) % 10 == 0:  # Save every 10 devices
+                self.save_devices()
             
             # Publish to MQTT if enabled
-            if self.mqtt_connected and self.mqtt_discovery_enabled:
-                self.publish_mqtt(f"{self.mqtt_topic}/{device_key}", self.devices[device_key])
+            if self.mqtt_client and self.mqtt_connected:
+                mqtt_message = {
+                    'mac_address': mac_address,
+                    'name': device_info['name'],
+                    'rssi': device_info['rssi'],
+                    'last_seen': device_info['last_seen'],
+                    'proxy': proxy_key,
+                    'seen_count': device_info['seen_count']
+                }
+                
+                # Publish to main topic
+                self.publish_mqtt(self.mqtt_topic, mqtt_message)
+                
+                # Publish to device-specific topic if discovery enabled
+                if self.mqtt_discovery_enabled:
+                    device_topic = f"{self.mqtt_topic}/devices/{mac_address.replace(':', '_')}"
+                    self.publish_mqtt(device_topic, mqtt_message)
             
-            logger.debug(f"[BLE] Processed advertisement from {name} ({address}) via {proxy_key}")
+            logger.debug(f"[BLE] Discovered device: {mac_address} ({device_info['name']}) via {proxy_key}")
             
         except Exception as e:
             logger.error(f"[BLE] Error processing advertisement: {e}")
 
     def scan_loop(self):
-        """Main scan loop - runs in background thread"""
+        """Main scan loop - currently just keeps the thread alive"""
+        logger.info("[SCAN] BLE scan loop started")
         while self.running:
-            try:
-                if self.running:
-                    # Scan logic is handled by ESP32 proxies
-                    pass
-                time.sleep(1)
-            except Exception as e:
-                logger.error(f"[SCAN] Error in scan loop: {e}")
-                time.sleep(5)
+            time.sleep(1)
+        logger.info("[SCAN] BLE scan loop stopped")
 
     def get_status(self):
-        """Get current status"""
+        """Get add-on status"""
         return {
             'version': ADDON_VERSION,
             'running': self.running,
-            'device_count': len(self.devices),
-            'proxy_count': len(self.esp32_proxies),
-            'connected_proxies': sum(1 for status in self.proxy_connections.values() if status),
-            'scan_interval': self.scan_interval,
             'mqtt_connected': self.mqtt_connected,
-            'mqtt_discovery_enabled': self.mqtt_discovery_enabled,
-            'proxy_connections': self.proxy_connections
+            'proxy_connections': len([c for c in self.proxy_connections.values() if c is not None]),
+            'total_proxies': len(self.esp32_proxies),
+            'devices_count': len(self.devices),
+            'scan_interval': self.scan_interval
         }
 
     def get_devices(self):
-        """Get all discovered devices"""
+        """Get discovered devices"""
         return self.devices
 
     def start_scan(self):
         """Start BLE scanning"""
-        self.running = True
         logger.info("[SCAN] BLE scanning started")
-        return {"status": "started"}
+        return {'status': 'started'}
 
     def stop_scan(self):
         """Stop BLE scanning"""
-        self.running = False
         logger.info("[SCAN] BLE scanning stopped")
-        return {"status": "stopped"}
+        return {'status': 'stopped'}
 
     def clear_devices(self):
-        """Clear all discovered devices"""
-        self.devices.clear()
+        """Clear all devices"""
+        self.devices = {}
+        self.save_devices()
         logger.info("[SCAN] All devices cleared")
-        return {"status": "cleared"}
+        return {'status': 'cleared'}
 
     async def test_websocket_connection(self, proxy):
-        """Test WebSocket connection to ESP32 proxy"""
-        host = proxy['host']
-        port = proxy.get('port', 6053)
-        password = proxy.get('password', '')
-        
-        logger.info(f"[TEST] Testing WebSocket connection to {host}:{port}")
+        """Test ESP32 proxy connection"""
+        proxy_key = f"{proxy['host']}:{proxy.get('port', 6053)}"
         
         try:
-            # Try ESPHome native API first
-            client = APIConnection(host, port, password=password)
-            await client.connect(login=True)
-            await client.disconnect()
-            logger.info(f"[TEST] ESPHome API connection successful to {host}:{port}")
-            return {"status": "success", "method": "esphome_api", "host": host, "port": port}
+            logger.info(f"[TEST] Testing ESP32 proxy connection to {proxy_key}...")
             
-        except APIConnectionError as e:
-            logger.warning(f"[TEST] ESPHome API failed: {e}")
-            # Try HTTP API fallback
-            return await self.try_http_api(proxy)
+            # Try ESPHome API connection
+            connection = APIConnection(
+                proxy['host'],
+                proxy.get('port', 6053),
+                proxy.get('password', ''),
+                client_info="BLE Scanner Add-on Test"
+            )
+            
+            await connection.connect()
+            await connection.ping()
+            await connection.disconnect()
+            
+            logger.info(f"[TEST] ESP32 proxy connection test successful for {proxy_key}")
+            return {'status': 'success', 'method': 'esphome_api', 'proxy': proxy_key}
             
         except Exception as e:
-            logger.error(f"[TEST] Connection test failed: {e}")
-            return {"status": "error", "error": str(e), "host": host, "port": port}
+            logger.error(f"[TEST] ESP32 proxy connection test failed for {proxy_key}: {e}")
+            return {'status': 'failed', 'error': str(e), 'proxy': proxy_key}
 
     async def try_http_api(self, proxy):
         """Try HTTP API as fallback"""
-        host = proxy['host']
-        port = proxy.get('port', 6053)
-        
         try:
+            url = f"http://{proxy['host']}:{proxy.get('port', 6053)}/ping"
             async with aiohttp.ClientSession() as session:
-                url = f"http://{host}:{port}/"
                 async with session.get(url, timeout=5) as response:
                     if response.status == 200:
-                        logger.info(f"[TEST] HTTP API connection successful to {host}:{port}")
-                        return {"status": "success", "method": "http_api", "host": host, "port": port}
-                    else:
-                        logger.warning(f"[TEST] HTTP API returned status {response.status}")
-                        return {"status": "error", "error": f"HTTP status {response.status}", "host": host, "port": port}
-        except Exception as e:
-            logger.error(f"[TEST] HTTP API fallback failed: {e}")
-            return {"status": "error", "error": str(e), "host": host, "port": port}
+                        return True
+        except Exception:
+            pass
+        return False
 
     def run(self):
-        """Start the Flask application"""
-        logger.info("[STARTUP] Starting Flask development server...")
-        self.app.run(host='0.0.0.0', port=8099, debug=False)
+        """Run the scanner"""
+        logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} starting...")
+        
+        # Load saved devices
+        self.load_devices()
+        
+        # Keep running
+        try:
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("[SHUTDOWN] Received shutdown signal")
+            self.running = False
 
-# HTML template for web interface
+# HTML template for the web interface
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>BLE Scanner</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLE Scanner - Home Assistant Add-on</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .header { text-align: center; margin-bottom: 30px; }
-        .status { background: #e8f5e8; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
-        .controls { margin-bottom: 20px; }
-        .btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-right: 10px; }
-        .btn:hover { background: #0056b3; }
-        .btn.danger { background: #dc3545; }
-        .btn.danger:hover { background: #c82333; }
-        .btn.success { background: #28a745; }
-        .btn.success:hover { background: #218838; }
-        .devices { margin-top: 20px; }
-        .device { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; margin-bottom: 10px; }
-        .device h3 { margin: 0 0 10px 0; color: #495057; }
-        .device-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-        .info-item { background: white; padding: 8px; border-radius: 3px; border: 1px solid #e9ecef; }
-        .info-label { font-weight: bold; color: #6c757d; font-size: 0.9em; }
-        .info-value { color: #495057; }
-        .scanning { color: #28a745; font-weight: bold; }
-        .stopped { color: #dc3545; font-weight: bold; }
-        .refresh-btn { float: right; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+        
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .status-bar {
+            background: #f8f9fa;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #dc3545;
+        }
+        
+        .status-indicator.online {
+            background: #28a745;
+        }
+        
+        .controls {
+            background: #f8f9fa;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #0056b3;
+            transform: translateY(-2px);
+        }
+        
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #1e7e34;
+            transform: translateY(-2px);
+        }
+        
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #c82333;
+            transform: translateY(-2px);
+        }
+        
+        .btn-warning {
+            background: #ffc107;
+            color: #212529;
+        }
+        
+        .btn-warning:hover {
+            background: #e0a800;
+            transform: translateY(-2px);
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .devices-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .devices-count {
+            font-size: 1.2em;
+            color: #6c757d;
+        }
+        
+        .devices-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        
+        .device-card {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        
+        .device-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        
+        .device-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+        
+        .device-name {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #212529;
+            margin-bottom: 5px;
+        }
+        
+        .device-mac {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #6c757d;
+        }
+        
+        .device-rssi {
+            background: #e9ecef;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: 500;
+        }
+        
+        .device-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .info-item {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .info-label {
+            font-size: 0.8em;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 2px;
+        }
+        
+        .info-value {
+            font-size: 0.9em;
+            color: #212529;
+            font-weight: 500;
+        }
+        
+        .device-actions {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        @media (max-width: 768px) {
+            .status-bar {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .controls {
+                flex-direction: column;
+            }
+            
+            .devices-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .device-info {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>BLE Scanner v{{ version }}</h1>
-            <p>Discover and monitor BLE devices via ESP32 proxies</p>
+            <h1>BLE Scanner</h1>
+            <p>Home Assistant Add-on for discovering and managing BLE devices</p>
         </div>
         
-        <div class="status" id="status">
-            <h3>Status</h3>
-            <div id="status-content">Loading...</div>
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-indicator" id="mqtt-status"></div>
+                <span>MQTT: <span id="mqtt-text">Unknown</span></span>
+            </div>
+            <div class="status-item">
+                <div class="status-indicator" id="proxy-status"></div>
+                <span>Proxies: <span id="proxy-text">0/0</span></span>
+            </div>
+            <div class="status-item">
+                <span>Devices: <span id="devices-count">0</span></span>
+            </div>
+            <div class="status-item">
+                <span>Version: <span id="version">1.0.20</span></span>
+            </div>
         </div>
         
         <div class="controls">
-            <button class="btn success" onclick="startScan()">Start Scan</button>
-            <button class="btn danger" onclick="stopScan()">Stop Scan</button>
-            <button class="btn" onclick="clearDevices()">Clear Devices</button>
-            <button class="btn" onclick="refreshData()" class="refresh-btn">Refresh</button>
+            <button class="btn btn-primary" onclick="startScan()">Start Scan</button>
+            <button class="btn btn-success" onclick="stopScan()">Stop Scan</button>
+            <button class="btn btn-warning" onclick="clearDevices()">Clear Devices</button>
+            <a href="/api/diagnostic" class="btn btn-primary" target="_blank">Diagnostic</a>
         </div>
         
-        <div class="devices" id="devices">
-            <h3>Discovered Devices (<span id="device-count">0</span>)</h3>
-            <div id="devices-content">No devices discovered yet.</div>
+        <div class="content">
+            <div class="devices-header">
+                <h2>Discovered Devices</h2>
+                <div class="devices-count" id="devices-count-header">0 devices</div>
+            </div>
+            
+            <div id="devices-content">
+                <div class="loading">Loading devices...</div>
+            </div>
         </div>
     </div>
-
+    
     <script>
         let refreshInterval;
         
-        function updateStatus(data) {
-            const statusContent = document.getElementById('status-content');
-            const scanStatus = data.running ? '<span class="scanning">SCANNING</span>' : '<span class="stopped">STOPPED</span>';
+        function updateStatus(status) {
+            // Update MQTT status
+            const mqttStatus = document.getElementById('mqtt-status');
+            const mqttText = document.getElementById('mqtt-text');
+            if (status.mqtt_connected) {
+                mqttStatus.className = 'status-indicator online';
+                mqttText.textContent = 'Connected';
+            } else {
+                mqttStatus.className = 'status-indicator';
+                mqttText.textContent = 'Disconnected';
+            }
             
-            statusContent.innerHTML = `
-                <div class="device-info">
-                    <div class="info-item">
-                        <div class="info-label">Scan Status</div>
-                        <div class="info-value">${scanStatus}</div>
-                    </div>
-                    <div class="info-item">
-                        <div class="info-label">Devices Found</div>
-                        <div class="info-value">${data.device_count}</div>
-                    </div>
-                    <div class="info-item">
-                        <div class="info-label">ESP32 Proxies</div>
-                        <div class="info-value">${data.proxy_count}</div>
-                    </div>
-                    <div class="info-item">
-                        <div class="info-label">MQTT Connected</div>
-                        <div class="info-value">${data.mqtt_connected ? 'Yes' : 'No'}</div>
-                    </div>
-                </div>
-            `;
+            // Update proxy status
+            const proxyStatus = document.getElementById('proxy-status');
+            const proxyText = document.getElementById('proxy-text');
+            const proxyCount = status.proxy_connections;
+            const totalProxies = status.total_proxies;
+            
+            if (proxyCount > 0) {
+                proxyStatus.className = 'status-indicator online';
+            } else {
+                proxyStatus.className = 'status-indicator';
+            }
+            proxyText.textContent = `${proxyCount}/${totalProxies}`;
+            
+            // Update devices count
+            document.getElementById('devices-count').textContent = status.devices_count;
+            document.getElementById('devices-count-header').textContent = `${status.devices_count} devices`;
+            
+            // Update version
+            document.getElementById('version').textContent = status.version;
         }
         
         function updateDevices(devices) {
             const devicesContent = document.getElementById('devices-content');
-            const deviceCount = document.getElementById('device-count');
             
-            deviceCount.textContent = Object.keys(devices).length;
-            
-            if (Object.keys(devices).length === 0) {
-                devicesContent.innerHTML = '<p>No devices discovered yet.</p>';
+            if (!devices || Object.keys(devices).length === 0) {
+                devicesContent.innerHTML = '<div class="loading">No devices discovered yet. Start scanning to discover BLE devices.</div>';
                 return;
             }
             
-            let html = '';
-            Object.values(devices).forEach(device => {
+            const html = Object.values(devices).map(device => {
                 const lastSeen = new Date(device.last_seen).toLocaleString();
                 const rssiColor = device.rssi > -50 ? '#28a745' : device.rssi > -70 ? '#ffc107' : '#dc3545';
                 
-                html += `
-                    <div class="device">
-                        <h3>${device.name || 'Unknown Device'}</h3>
+                return `
+                    <div class="device-card">
+                        <div class="device-header">
+                            <div>
+                                <div class="device-name">${device.name}</div>
+                                <div class="device-mac">${device.mac_address}</div>
+                            </div>
+                            <div class="device-rssi" style="color: ${rssiColor}">${device.rssi} dBm</div>
+                        </div>
                         <div class="device-info">
                             <div class="info-item">
-                                <div class="info-label">Address</div>
-                                <div class="info-value">${device.address}</div>
-                            </div>
-                            <div class="info-item">
-                                <div class="info-label">RSSI</div>
-                                <div class="info-value" style="color: ${rssiColor}">${device.rssi} dBm</div>
+                                <div class="info-label">Manufacturer</div>
+                                <div class="info-value">${device.manufacturer}</div>
                             </div>
                             <div class="info-item">
                                 <div class="info-label">Last Seen</div>
@@ -646,7 +948,7 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
                 `;
-            });
+            }).join('');
             
             devicesContent.innerHTML = html;
         }
@@ -712,123 +1014,144 @@ HTML_TEMPLATE = """
 </html>
 """
 
-if __name__ == '__main__':
-    logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} initializing...")
+# Initialize scanner instance
+def init_scanner():
+    global scanner
+    if scanner is None:
+        scanner = BLEScanner()
+    return scanner
+
+# Flask routes
+@app.route('/')
+def index():
+    """Main web interface"""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/status')
+def api_status():
+    """Get add-on status"""
+    if scanner is None:
+        init_scanner()
+    return jsonify(scanner.get_status())
+
+@app.route('/api/devices')
+def api_devices():
+    """Get discovered devices"""
+    if scanner is None:
+        init_scanner()
+    return jsonify(scanner.get_devices())
+
+@app.route('/api/scan/start', methods=['POST'])
+def api_start_scan():
+    """Start BLE scanning"""
+    if scanner is None:
+        init_scanner()
+    return jsonify(scanner.start_scan())
+
+@app.route('/api/scan/stop', methods=['POST'])
+def api_stop_scan():
+    """Stop BLE scanning"""
+    if scanner is None:
+        init_scanner()
+    return jsonify(scanner.stop_scan())
+
+@app.route('/api/devices/clear', methods=['POST'])
+def api_clear_devices():
+    """Clear all devices"""
+    if scanner is None:
+        init_scanner()
+    return jsonify(scanner.clear_devices())
+
+@app.route('/api/diagnostic')
+def api_diagnostic():
+    """Diagnostic endpoint"""
+    if scanner is None:
+        init_scanner()
+    return jsonify({
+        "version": ADDON_VERSION,
+        "config": {
+            "mqtt_host": scanner.mqtt_host,
+            "mqtt_port": scanner.mqtt_port,
+            "mqtt_topic": scanner.mqtt_topic,
+            "mqtt_discovery_enabled": scanner.mqtt_discovery_enabled,
+            "esp32_proxies": scanner.esp32_proxies
+        },
+        "status": scanner.get_status(),
+        "proxy_connections": scanner.proxy_connections
+    })
+
+@app.route('/api/devices/<mac_address>', methods=['POST'])
+def add_device(mac_address):
+    """Add a device manually"""
+    if scanner is None:
+        init_scanner()
+    logger.info("[API] /api/devices/<mac_address> called")
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+        
+    device = {
+        'mac_address': mac_address.upper(),
+        'name': data.get('name', 'Unknown Device'),
+        'rssi': data.get('rssi', 0),
+        'last_seen': datetime.now().isoformat(),
+        'manufacturer': data.get('manufacturer', 'Unknown'),
+        'services': data.get('services', []),
+        'added_manually': True
+    }
     
-    # Create Flask app
-    app = Flask(__name__)
+    scanner.devices[mac_address.upper()] = device
+    scanner.save_devices()
+    
+    return jsonify(device)
 
-    # Create scanner instance
-    scanner = BLEScanner()
-
-    @app.route('/')
-    def index():
-        """Main web interface"""
-        return render_template_string(HTML_TEMPLATE)
-
-    @app.route('/api/status')
-    def api_status():
-        """Get add-on status"""
-        return jsonify(scanner.get_status())
-
-    @app.route('/api/devices')
-    def api_devices():
-        """Get discovered devices"""
-        return jsonify(scanner.get_devices())
-
-    @app.route('/api/scan/start', methods=['POST'])
-    def api_start_scan():
-        """Start BLE scanning"""
-        return jsonify(scanner.start_scan())
-
-    @app.route('/api/scan/stop', methods=['POST'])
-    def api_stop_scan():
-        """Stop BLE scanning"""
-        return jsonify(scanner.stop_scan())
-
-    @app.route('/api/devices/clear', methods=['POST'])
-    def api_clear_devices():
-        """Clear all devices"""
-        return jsonify(scanner.clear_devices())
-
-    @app.route('/api/diagnostic')
-    def api_diagnostic():
-        """Diagnostic endpoint"""
-        return jsonify({
-            "version": ADDON_VERSION,
-            "config": {
-                "mqtt_host": scanner.mqtt_host,
-                "mqtt_port": scanner.mqtt_port,
-                "mqtt_topic": scanner.mqtt_topic,
-                "mqtt_discovery_enabled": scanner.mqtt_discovery_enabled,
-                "esp32_proxies": scanner.esp32_proxies
-            },
-            "status": scanner.get_status(),
-            "proxy_connections": scanner.proxy_connections
-        })
-
-    @app.route('/api/devices/<mac_address>', methods=['POST'])
-    def add_device(mac_address):
-        """Add a device manually"""
-        logger.info("[API] /api/devices/<mac_address> called")
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-            
-        device = {
-            'mac_address': mac_address.upper(),
-            'name': data.get('name', 'Unknown Device'),
-            'rssi': data.get('rssi', 0),
-            'last_seen': datetime.now().isoformat(),
-            'manufacturer': data.get('manufacturer', 'Unknown'),
-            'services': data.get('services', []),
-            'added_manually': True
-        }
-        
-        scanner.devices[mac_address.upper()] = device
+@app.route('/api/devices/<mac_address>', methods=['DELETE'])
+def remove_device(mac_address):
+    """Remove a device"""
+    if scanner is None:
+        init_scanner()
+    logger.info("[API] /api/devices/<mac_address> called")
+    if mac_address.upper() in scanner.devices:
+        del scanner.devices[mac_address.upper()]
         scanner.save_devices()
-        
-        return jsonify(device)
+        return jsonify({'message': 'Device removed'})
+    return jsonify({'error': 'Device not found'}), 404
 
-    @app.route('/api/devices/<mac_address>', methods=['DELETE'])
-    def remove_device(mac_address):
-        """Remove a device"""
-        logger.info("[API] /api/devices/<mac_address> called")
-        if mac_address.upper() in scanner.devices:
-            del scanner.devices[mac_address.upper()]
-            scanner.save_devices()
-            return jsonify({'message': 'Device removed'})
-        return jsonify({'error': 'Device not found'}), 404
+@app.route('/api/test_proxy/<int:proxy_index>', methods=['GET'])
+def test_proxy(proxy_index):
+    """Test ESP32 proxy connection"""
+    if scanner is None:
+        init_scanner()
+    if proxy_index >= len(scanner.esp32_proxies):
+        return jsonify({'error': 'Invalid proxy index'}), 400
+    
+    proxy = scanner.esp32_proxies[proxy_index]
+    logger.info(f"[API] Testing proxy {proxy_index}: {proxy['host']}:{proxy.get('port', 6053)}")
+    
+    # Run test in background thread
+    def run_test():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(scanner.test_websocket_connection(proxy))
+            logger.info(f"[API] Proxy test result: {result}")
+        except Exception as e:
+            logger.error(f"[API] Proxy test error: {e}")
+        finally:
+            loop.close()
+    
+    threading.Thread(target=run_test, daemon=True).start()
+    return jsonify({'message': 'Proxy test started', 'proxy': proxy})
 
-    @app.route('/api/test_proxy/<int:proxy_index>', methods=['GET'])
-    def test_proxy(proxy_index):
-        """Test ESP32 proxy connection"""
-        if proxy_index >= len(scanner.esp32_proxies):
-            return jsonify({'error': 'Invalid proxy index'}), 400
-        
-        proxy = scanner.esp32_proxies[proxy_index]
-        logger.info(f"[API] Testing proxy {proxy_index}: {proxy['host']}:{proxy.get('port', 6053)}")
-        
-        # Run test in background thread
-        def run_test():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(scanner.test_websocket_connection(proxy))
-                logger.info(f"[API] Proxy test result: {result}")
-            except Exception as e:
-                logger.error(f"[API] Proxy test error: {e}")
-            finally:
-                loop.close()
-        
-        threading.Thread(target=run_test, daemon=True).start()
-        return jsonify({'message': 'Proxy test started', 'proxy': proxy})
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Handle unhandled exceptions"""
+    logger.error(f"[API] Unhandled exception: {e}")
+    return jsonify({'error': str(e)}), 500
 
-    @app.errorhandler(Exception)
-    def handle_exception(e):
-        """Handle unhandled exceptions"""
-        logger.error(f"[API] Unhandled exception: {e}")
-        return jsonify({'error': str(e)}), 500
+# Initialize scanner when module is imported
+init_scanner()
 
-    # For development only - use Gunicorn in production
+if __name__ == '__main__':
+    logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} starting in development mode...")
     app.run(host='0.0.0.0', port=8099, debug=False) 

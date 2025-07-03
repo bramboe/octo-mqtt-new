@@ -19,7 +19,6 @@ from flask import Flask, jsonify, render_template, request, render_template_stri
 from flask_cors import CORS
 import threading
 import requests
-from aioesphomeapi import APIConnection, APIConnectionError
 from asyncio_mqtt import Client as MqttClient
 import asyncio_mqtt
 
@@ -30,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.28"
+ADDON_VERSION = "1.0.29"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -43,7 +42,6 @@ class BLEScanner:
     def __init__(self):
         logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} initializing...")
         self.devices = {}
-        self.esp32_proxies = []
         self.scan_interval = 30
         self.running = True
         self.scan_thread = None
@@ -55,17 +53,12 @@ class BLEScanner:
         self.mqtt_discovery = False
         self.mqtt_client = None
         self.mqtt_connected = False
-        # Proxy connection tracking
-        self.proxy_connections = {}
         
         # Load configuration
         self.load_config()
         
         # Setup MQTT
         self.setup_mqtt()
-        
-        # Start ESP32 proxy connections
-        self.start_esp32_proxies()
         
         # Start scan loop
         self.scan_thread = threading.Thread(target=self.scan_loop, daemon=True)
@@ -79,7 +72,6 @@ class BLEScanner:
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                self.esp32_proxies = config.get('esp32_proxies', [])
                 self.scan_interval = config.get('scan_interval', 30)
                 log_level = config.get('log_level', 'info')
                 # MQTT (smartbed-mqtt style)
@@ -91,7 +83,7 @@ class BLEScanner:
                 # Set log level
                 if log_level == 'debug':
                     logging.getLogger().setLevel(logging.DEBUG)
-                logger.info(f"[CONFIG] Loaded: {len(self.esp32_proxies)} ESP32 proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery}")
+                logger.info(f"[CONFIG] Loaded: MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery}")
             else:
                 logger.warning("[CONFIG] No configuration file found, using defaults")
         except Exception as e:
@@ -165,13 +157,11 @@ class BLEScanner:
         while self.running:
             try:
                 await self.mqtt_client.connect()
-            self.mqtt_connected = True
+                self.mqtt_connected = True
                 logger.info("[MQTT] Connected to MQTT broker")
-                
                 # Keep connection alive
                 while self.running:
                     await asyncio.sleep(10)
-                    
             except Exception as e:
                 self.mqtt_connected = False
                 logger.error(f"[MQTT] Connection error: {e}")
@@ -321,110 +311,6 @@ class BLEScanner:
         except Exception:
             return False
 
-    def start_esp32_proxies(self):
-        """Start ESP32 proxy connections"""
-        for proxy in self.esp32_proxies:
-            threading.Thread(target=self._run_esp32_proxy, args=(proxy,), daemon=True).start()
-
-    def _run_esp32_proxy(self, proxy):
-        """Run ESP32 proxy connection in background thread"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self.connect_esp32_proxy(proxy))
-        except Exception as e:
-            logger.error(f"[PROXY] Error in ESP32 proxy connection: {e}")
-        finally:
-            loop.close()
-    
-    async def connect_esp32_proxy(self, proxy):
-        """Connect to ESP32 BLE proxy using ESPHome API"""
-        proxy_key = f"{proxy['host']}:{proxy.get('port', 6053)}"
-        while self.running:
-            try:
-                logger.info(f"[PROXY] Connecting to ESP32 proxy at {proxy_key}...")
-                connection = APIConnection(
-                    proxy['host'],
-                    proxy.get('port', 6053),
-                    proxy.get('password', ''),
-                    "BLE Scanner Add-on"
-                )
-                await connection.connect()
-                logger.info(f"[PROXY] Connected to ESP32 proxy at {proxy_key}")
-                self.proxy_connections[proxy_key] = connection
-                async def handle_ble_advertisement(adv):
-                    await self.process_ble_advertisement(adv, proxy_key)
-                await connection.subscribe_ble_advertisements(handle_ble_advertisement)
-                while self.running:
-                    try:
-                        await asyncio.sleep(10)
-                        await connection.ping()
-                    except Exception as e:
-                        logger.error(f"[PROXY] Connection error for {proxy_key}: {e}")
-                        break
-            except Exception as e:
-                logger.error(f"[PROXY] Failed to connect to ESP32 proxy at {proxy_key}: {e}")
-                self.proxy_connections[proxy_key] = None
-            if self.running:
-                await asyncio.sleep(30)
-
-    async def process_ble_advertisement(self, data, proxy_key):
-        """Process BLE advertisement data"""
-        try:
-            # Extract device information
-            mac_address = data.get('address', '').upper()
-                if not mac_address:
-                    return
-                
-            device_info = {
-                'mac_address': mac_address,
-                'name': data.get('name', 'Unknown Device'),
-                'rssi': data.get('rssi', 0),
-                'last_seen': datetime.now().isoformat(),
-                'manufacturer': data.get('manufacturer', 'Unknown'),
-                'services': data.get('services', []),
-                'proxy': proxy_key,
-                'seen_count': 1
-            }
-            
-            # Update or add device
-            if mac_address in self.devices:
-                existing = self.devices[mac_address]
-                device_info['seen_count'] = existing.get('seen_count', 0) + 1
-                # Keep the original name if it was manually added
-                if existing.get('added_manually'):
-                    device_info['name'] = existing['name']
-            
-            self.devices[mac_address] = device_info
-            
-            # Save devices periodically
-            if len(self.devices) % 10 == 0:  # Save every 10 devices
-                self.save_devices()
-            
-            # Publish to MQTT if enabled
-            if self.mqtt_client and self.mqtt_connected:
-                mqtt_message = {
-                    'mac_address': mac_address,
-                    'name': device_info['name'],
-                    'rssi': device_info['rssi'],
-                    'last_seen': device_info['last_seen'],
-                    'proxy': proxy_key,
-                    'seen_count': device_info['seen_count']
-                }
-                
-                # Publish to main topic
-                self.publish_mqtt(self.mqtt_topic, mqtt_message)
-                
-                # Publish to device-specific topic if discovery enabled
-                if self.mqtt_discovery:
-                    device_topic = f"{self.mqtt_topic}/devices/{mac_address.replace(':', '_')}"
-                    self.publish_mqtt(device_topic, mqtt_message)
-            
-            logger.debug(f"[BLE] Discovered device: {mac_address} ({device_info['name']}) via {proxy_key}")
-            
-        except Exception as e:
-            logger.error(f"[BLE] Error processing advertisement: {e}")
-
     def scan_loop(self):
         """Main scan loop - currently just keeps the thread alive"""
         logger.info("[SCAN] BLE scan loop started")
@@ -438,8 +324,6 @@ class BLEScanner:
             'version': ADDON_VERSION,
             'running': self.running,
             'mqtt_connected': self.mqtt_connected,
-            'proxy_connections': len([c for c in self.proxy_connections.values() if c is not None]),
-            'total_proxies': len(self.esp32_proxies),
             'devices_count': len(self.devices),
             'scan_interval': self.scan_interval
         }
@@ -464,38 +348,6 @@ class BLEScanner:
         self.save_devices()
         logger.info("[SCAN] All devices cleared")
         return {'status': 'cleared'}
-
-    async def test_websocket_connection(self, proxy):
-        """Test ESP32 proxy connection"""
-        proxy_key = f"{proxy['host']}:{proxy.get('port', 6053)}"
-        try:
-            logger.info(f"[TEST] Testing ESP32 proxy connection to {proxy_key}...")
-            connection = APIConnection(
-                proxy['host'],
-                proxy.get('port', 6053),
-                proxy.get('password', ''),
-                "BLE Scanner Add-on Test"
-            )
-            await connection.connect()
-            await connection.ping()
-            await connection.disconnect()
-            logger.info(f"[TEST] ESP32 proxy connection test successful for {proxy_key}")
-            return {'status': 'success', 'method': 'esphome_api', 'proxy': proxy_key}
-        except Exception as e:
-            logger.error(f"[TEST] ESP32 proxy connection test failed for {proxy_key}: {e}")
-            return {'status': 'failed', 'error': str(e), 'proxy': proxy_key}
-
-    async def try_http_api(self, proxy):
-        """Try HTTP API as fallback"""
-        try:
-            url = f"http://{proxy['host']}:{proxy.get('port', 6053)}/ping"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as response:
-                    if response.status == 200:
-                        return True
-        except Exception:
-            pass
-        return False
 
     def run(self):
         """Run the scanner"""
@@ -797,10 +649,6 @@ HTML_TEMPLATE = """
                 <span>MQTT: <span id="mqtt-text">Unknown</span></span>
             </div>
             <div class="status-item">
-                <div class="status-indicator" id="proxy-status"></div>
-                <span>Proxies: <span id="proxy-text">0/0</span></span>
-            </div>
-            <div class="status-item">
                 <span>Devices: <span id="devices-count">0</span></span>
             </div>
             <div class="status-item">
@@ -842,19 +690,6 @@ HTML_TEMPLATE = """
                 mqttText.textContent = 'Disconnected';
             }
             
-            // Update proxy status
-            const proxyStatus = document.getElementById('proxy-status');
-            const proxyText = document.getElementById('proxy-text');
-            const proxyCount = status.proxy_connections;
-            const totalProxies = status.total_proxies;
-            
-            if (proxyCount > 0) {
-                proxyStatus.className = 'status-indicator online';
-            } else {
-                proxyStatus.className = 'status-indicator';
-            }
-            proxyText.textContent = `${proxyCount}/${totalProxies}`;
-            
             // Update devices count
             document.getElementById('devices-count').textContent = status.devices_count;
             document.getElementById('devices-count-header').textContent = `${status.devices_count} devices`;
@@ -886,20 +721,12 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="device-info">
                             <div class="info-item">
-                                <div class="info-label">Manufacturer</div>
-                                <div class="info-value">${device.manufacturer}</div>
-                            </div>
-                            <div class="info-item">
                                 <div class="info-label">Last Seen</div>
                                 <div class="info-value">${lastSeen}</div>
                             </div>
                             <div class="info-item">
                                 <div class="info-label">Seen Count</div>
                                 <div class="info-value">${device.seen_count}</div>
-                            </div>
-                            <div class="info-item">
-                                <div class="info-label">Proxy</div>
-                                <div class="info-value">${device.proxy}</div>
                             </div>
                         </div>
                     </div>
@@ -1028,12 +855,9 @@ def api_diagnostic():
         "config": {
             "mqtt_host": scanner.mqtt_host,
             "mqtt_port": scanner.mqtt_port,
-            "mqtt_topic": scanner.mqtt_topic,
             "mqtt_discovery_enabled": scanner.mqtt_discovery,
-            "esp32_proxies": scanner.esp32_proxies
         },
         "status": scanner.get_status(),
-        "proxy_connections": scanner.proxy_connections
     })
 
 @app.route('/api/devices/<mac_address>', methods=['POST'])
@@ -1072,32 +896,6 @@ def remove_device(mac_address):
         scanner.save_devices()
         return jsonify({'message': 'Device removed'})
     return jsonify({'error': 'Device not found'}), 404
-
-@app.route('/api/test_proxy/<int:proxy_index>', methods=['GET'])
-def test_proxy(proxy_index):
-    """Test ESP32 proxy connection"""
-    if scanner is None:
-        init_scanner()
-    if proxy_index >= len(scanner.esp32_proxies):
-        return jsonify({'error': 'Invalid proxy index'}), 400
-    
-    proxy = scanner.esp32_proxies[proxy_index]
-    logger.info(f"[API] Testing proxy {proxy_index}: {proxy['host']}:{proxy.get('port', 6053)}")
-    
-    # Run test in background thread
-    def run_test():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            result = loop.run_until_complete(scanner.test_websocket_connection(proxy))
-            logger.info(f"[API] Proxy test result: {result}")
-        except Exception as e:
-            logger.error(f"[API] Proxy test error: {e}")
-        finally:
-            loop.close()
-    
-    threading.Thread(target=run_test, daemon=True).start()
-    return jsonify({'message': 'Proxy test started', 'proxy': proxy})
 
 @app.errorhandler(Exception)
 def handle_exception(e):

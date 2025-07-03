@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.36"
+ADDON_VERSION = "1.0.37"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -37,6 +37,15 @@ CORS(app)
 
 # Global scanner instance
 scanner = None
+
+def create_app():
+    """Flask app factory to initialize MQTT after app starts"""
+    global scanner
+    if scanner is None:
+        scanner = BLEScanner()
+        # Initialize MQTT after Flask app is running
+        scanner.setup_mqtt()
+    return app
 
 class BLEScanner:
     def __init__(self):
@@ -52,10 +61,10 @@ class BLEScanner:
         self.mqtt_discovery = False
         self.mqtt_client = None
         self.mqtt_connected = False
+        self.mqtt_initialized = False
         # Load configuration
         self.load_config()
-        # Setup MQTT
-        self.setup_mqtt()
+        # MQTT will be setup after Flask app starts
         
     def load_config(self):
         """Load configuration from Home Assistant addon options"""
@@ -96,6 +105,9 @@ class BLEScanner:
     
     def setup_mqtt(self):
         """Setup MQTT client using smartbed-mqtt approach"""
+        if self.mqtt_initialized:
+            return
+            
         # Handle auto-detection for MQTT host
         if self.mqtt_host == '<auto_detect>' or not self.mqtt_host:
             logger.info("[MQTT] Auto-detecting MQTT broker...")
@@ -103,6 +115,7 @@ class BLEScanner:
         if not self.mqtt_host:
             logger.info("[MQTT] Could not auto-detect MQTT broker, MQTT will be disabled.")
             self.mqtt_client = None
+            self.mqtt_initialized = True
             return
         # Handle auto-detection for MQTT credentials
         if self.mqtt_username == '<auto_detect>' or not self.mqtt_username:
@@ -112,6 +125,7 @@ class BLEScanner:
         if not self.mqtt_host:
             logger.info("[MQTT] No MQTT host available, MQTT will be disabled.")
             self.mqtt_client = None
+            self.mqtt_initialized = True
             return
         # Create MQTT client using asyncio-mqtt (smartbed-mqtt approach)
         try:
@@ -125,9 +139,11 @@ class BLEScanner:
             logger.info(f"[MQTT] Connecting to MQTT broker at {self.mqtt_host}:{self.mqtt_port}...")
             self.mqtt_client = MqttClient(**mqtt_config)
             threading.Thread(target=self._run_mqtt_connect_loop, daemon=True).start()
+            self.mqtt_initialized = True
         except Exception as e:
             logger.error(f"[MQTT] Error setting up MQTT client: {e}")
             self.mqtt_client = None
+            self.mqtt_initialized = True
     
     def _run_mqtt_connect_loop(self):
         """Run MQTT connection loop in background thread"""
@@ -777,6 +793,8 @@ def init_scanner():
     global scanner
     if scanner is None:
         scanner = BLEScanner()
+        # Initialize MQTT after Flask app is running
+        scanner.setup_mqtt()
     return scanner
 
 # Flask routes
@@ -878,8 +896,8 @@ def handle_exception(e):
     logger.error(f"[API] Unhandled exception: {e}")
     return jsonify({'error': str(e)}), 500
 
-# Initialize scanner when module is imported
-init_scanner()
+# Initialize scanner when first API call is made
+# (This prevents MQTT initialization before Gunicorn starts)
 
 if __name__ == '__main__':
     logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} starting in development mode...")

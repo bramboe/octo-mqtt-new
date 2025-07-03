@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.23"
+ADDON_VERSION = "1.0.24"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -254,6 +254,20 @@ class BLEScanner:
         """Auto-detect MQTT credentials using smartbed-mqtt approach"""
         logger.info("[MQTT] Auto-detecting MQTT credentials...")
         
+        # Try to get credentials from MQTT add-on config (most reliable)
+        try:
+            response = requests.get("http://supervisor/addons/core-mosquitto/config", timeout=5)
+            if response.status_code == 200:
+                config = response.json()
+                mqtt_user = config.get('username')
+                mqtt_password = config.get('password')
+                
+                if mqtt_user and mqtt_password:
+                    logger.info("[MQTT] Found MQTT credentials from MQTT add-on config")
+                    return mqtt_user, mqtt_password
+        except Exception as e:
+            logger.debug(f"[MQTT] Error getting credentials from MQTT add-on: {e}")
+        
         # Try to read from Home Assistant secrets
         secrets_path = "/config/secrets.yaml"
         if os.path.exists(secrets_path):
@@ -273,55 +287,6 @@ class BLEScanner:
                         
             except Exception as e:
                 logger.debug(f"[MQTT] Error reading secrets.yaml: {e}")
-        
-        # Try to read from configuration.yaml
-        config_path = "/config/configuration.yaml"
-        if os.path.exists(config_path):
-            try:
-                import yaml
-                with open(config_path, 'r') as f:
-                    config = yaml.safe_load(f)
-                
-                if config and 'mqtt' in config:
-                    mqtt_config = config['mqtt']
-                    mqtt_user = mqtt_config.get('username') or mqtt_config.get('user')
-                    mqtt_password = mqtt_config.get('password') or mqtt_config.get('pass')
-                    
-                    if mqtt_user and mqtt_password:
-                        logger.info("[MQTT] Found MQTT credentials in configuration.yaml")
-                        return mqtt_user, mqtt_password
-                        
-            except Exception as e:
-                logger.debug(f"[MQTT] Error reading configuration.yaml: {e}")
-        
-        # Try to get credentials from Home Assistant API
-        try:
-            response = requests.get("http://supervisor/core/api/config", timeout=5)
-            if response.status_code == 200:
-                config = response.json()
-                mqtt_config = config.get('mqtt', {})
-                mqtt_user = mqtt_config.get('username') or mqtt_config.get('user')
-                mqtt_password = mqtt_config.get('password') or mqtt_config.get('pass')
-                
-                if mqtt_user and mqtt_password:
-                    logger.info("[MQTT] Found MQTT credentials via Home Assistant API")
-                    return mqtt_user, mqtt_password
-        except Exception as e:
-            logger.debug(f"[MQTT] Error getting credentials from Home Assistant API: {e}")
-        
-        # Try to get credentials from MQTT add-on config
-        try:
-            response = requests.get("http://supervisor/addons/core-mosquitto/config", timeout=5)
-            if response.status_code == 200:
-                config = response.json()
-                mqtt_user = config.get('username')
-                mqtt_password = config.get('password')
-                
-                if mqtt_user and mqtt_password:
-                    logger.info("[MQTT] Found MQTT credentials from MQTT add-on config")
-                    return mqtt_user, mqtt_password
-        except Exception as e:
-            logger.debug(f"[MQTT] Error getting credentials from MQTT add-on: {e}")
         
         # Try common default credentials
         default_credentials = [
@@ -400,7 +365,8 @@ class BLEScanner:
                 connection = APIConnection(
                     proxy['host'],
                     proxy.get('port', 6053),
-                    proxy.get('password', '')
+                    proxy.get('password', ''),
+                    None  # encryption_key (not used)
                 )
                 
                 await connection.connect()
@@ -543,7 +509,8 @@ class BLEScanner:
             connection = APIConnection(
                 proxy['host'],
                 proxy.get('port', 6053),
-                proxy.get('password', '')
+                proxy.get('password', ''),
+                None  # encryption_key (not used)
             )
             
             await connection.connect()

@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.27"
+ADDON_VERSION = "1.0.28"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)

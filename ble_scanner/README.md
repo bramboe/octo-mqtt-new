@@ -1,263 +1,123 @@
-# BLE Scanner - Home Assistant Addon
+# BLE Scanner Add-on for Home Assistant
 
-A standalone Home Assistant addon that scans for Bluetooth Low Energy (BLE) devices using ESP32 BLE proxies. This addon provides a modern web UI for discovering, managing, and monitoring BLE devices without requiring integration with your main Home Assistant instance.
+A standalone BLE scanner add-on for Home Assistant that uses ESP32 BLE proxies to discover and manage Bluetooth Low Energy devices. Provides a web UI for device management and MQTT integration for Home Assistant automation.
 
 ## Features
 
-- 🔍 **BLE Device Discovery**: Automatically scan for BLE devices using ESP32 proxies
-- 🌐 **Modern Web UI**: Beautiful, responsive interface for device management
-- 📱 **Real-time Updates**: Live device status and RSSI monitoring
-- ➕ **Manual Device Addition**: Add devices manually by MAC address
-- 💾 **Persistent Storage**: Devices are saved and restored between restarts
-- 🔧 **Configurable**: Customize scan intervals and proxy settings
-- 📊 **Device Analytics**: View RSSI, manufacturer data, and service information
-- 📡 **MQTT Integration**: Optional Home Assistant MQTT device discovery
+- **ESP32 BLE Proxy Integration**: Connect to ESP32 devices running ESPHome BLE proxy firmware
+- **Web UI**: Modern web interface for device discovery and management
+- **MQTT Integration**: Automatic MQTT broker detection and credential management
+- **Device Management**: Add, remove, and track BLE devices
+- **Real-time Scanning**: Continuous BLE device discovery
+- **Home Assistant Compatible**: Runs as a standalone add-on on Home Assistant OS
 
-## Prerequisites
+## Version 1.0.27
 
-### ESP32 BLE Proxy Setup
-
-Before using this addon, you need to set up ESP32 devices as BLE proxies. Follow these steps:
-
-1. **Flash ESP32 with ESPHome**:
-   ```yaml
-   # Example ESPHome configuration for BLE proxy
-   esphome:
-     name: my-ble-proxy
-     platform: ESP32
-     board: esp32dev
-     framework:
-       type: esp-idf
-
-   # Enable BLE tracker
-   esp32_ble_tracker:
-     scan_parameters:
-       interval: 1100ms
-       window: 1100ms
-       active: true
-
-   # Enable Bluetooth proxy
-   bluetooth_proxy:
-     active: true
-     connection_slots: 3
-
-   # Enable API for communication
-   api:
-     port: 6053
-
-   # Optional: Use Ethernet for better performance
-   ethernet:
-     type: LAN8720
-     mdc_pin: GPIO23
-     mdio_pin: GPIO18
-     clk_mode: GPIO17_OUT
-     phy_addr: 0
-     power_pin: GPIO12
-   ```
-
-2. **Network Configuration**: Ensure your ESP32 proxies are accessible on your network
-
-## Configuration
-
-### MQTT Settings
-
-The addon supports MQTT integration with Home Assistant:
-
-- **MQTT Host**: Set to `<auto_detect>` to automatically detect your MQTT broker
-- **MQTT Port**: Set to `<auto_detect>` to use the default port (1883)
-- **MQTT Credentials**: Set to `<auto_detect>` to automatically detect credentials
-- **MQTT Topic**: Topic for publishing device data (default: `ble_scanner/data`)
-- **MQTT Discovery**: Enable/disable Home Assistant MQTT device discovery
-
-When MQTT Discovery is enabled, the addon will create Home Assistant devices with:
-- RSSI sensor (signal strength in dBm)
-- Last seen sensor (timestamp)
-- Presence binary sensor (ON when device is detected)
-
-When MQTT Discovery is disabled, device data is published as JSON to the configured topic.
+### Recent Fixes
+- ✅ Fixed ESP32 proxy connection using proper APIConnection parameters
+- ✅ Improved MQTT credential auto-detection
+- ✅ Enhanced error logging and debugging
+- ✅ Updated to use asyncio-mqtt for reliable MQTT connections
+- ✅ Production-ready with Gunicorn WSGI server
 
 ## Installation
 
-### Method 1: Manual Installation
-
-1. **Clone or download this repository** to your Home Assistant addons directory:
-   ```bash
-   cd /opt/addons
-   git clone <repository-url> ble-scanner
+1. **Add this repository to Home Assistant**:
+   ```
+   https://github.com/yourusername/ble_scanner
    ```
 
-2. **Build the addon**:
-   ```bash
-   cd ble-scanner
-   docker build -t ble-scanner .
+2. **Install the BLE Scanner add-on** from the Add-on Store
+
+3. **Configure ESP32 proxies** in the add-on configuration:
+   ```yaml
+   esp32_proxies:
+     - host: "192.168.1.109"
+       port: 6053
+       password: ""
    ```
 
-3. **Add to Home Assistant**:
-   - Go to Settings → Add-ons → Add-on Store
-   - Click the three dots menu → Repositories
-   - Add your local path: `/opt/addons/ble-scanner`
-
-### Method 2: Using Home Assistant Builder
-
-1. **Set up the builder** (if not already done):
-   ```bash
-   docker run --rm -v "$(pwd)":/data ghcr.io/hassio-addons/builder:latest --target ble-scanner --all
+4. **Configure MQTT** (optional):
+   ```yaml
+   mqtt_host: "<auto_detect>"
+   mqtt_port: 1883
+   mqtt_username: ""
+   mqtt_password: ""
+   mqtt_discovery: false
    ```
 
-2. **Build the addon**:
-   ```bash
-   ./build.sh
-   ```
+## ESP32 BLE Proxy Setup
 
-## Configuration
-
-### Basic Configuration
-
-Configure the addon through the Home Assistant addon interface:
+Your ESP32 devices need to be running ESPHome firmware with BLE proxy enabled. Example configuration:
 
 ```yaml
-esp32_proxies:
-  - name: "Living Room Proxy"
-    host: "192.168.1.100"
-    port: 6053
-  - name: "Bedroom Proxy"
-    host: "192.168.1.101"
-    port: 6053
-
-scan_interval: 30  # seconds
-log_level: info    # debug, info, warning, error
+esp32_ble_proxy:
+  active: true
+  on_ble_advertise:
+    - then:
+        - logger.log: "BLE Advertisement: {{ packet }}"
 ```
-
-### Configuration Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `esp32_proxies` | list | `[]` | List of ESP32 BLE proxy configurations |
-| `esp32_proxies[].name` | string | - | Friendly name for the proxy |
-| `esp32_proxies[].host` | string | - | IP address of the ESP32 proxy |
-| `esp32_proxies[].port` | integer | `6053` | WebSocket port of the ESP32 proxy |
-| `scan_interval` | integer | `30` | Interval between scan attempts (seconds) |
-| `log_level` | string | `info` | Logging level |
 
 ## Usage
 
-### Web Interface
+1. **Access the Web UI** at `http://your-ha-ip:8099`
+2. **Start scanning** to discover BLE devices
+3. **Add devices** to your tracking list
+4. **Monitor devices** in real-time
+5. **MQTT integration** automatically publishes device data
 
-1. **Access the UI**: Navigate to the addon in Home Assistant and click "Open Web UI"
-2. **Start Scanning**: Click "Start Scan" to begin discovering BLE devices
-3. **View Devices**: Discovered devices will appear in the list with their details
-4. **Add Manually**: Use the form to add devices manually by MAC address
-5. **Monitor Status**: View real-time scan status and device counts
+## Configuration Options
 
-### API Endpoints
+| Option | Default | Description |
+|--------|---------|-------------|
+| `esp32_proxies` | `[]` | List of ESP32 BLE proxy devices |
+| `mqtt_host` | `<auto_detect>` | MQTT broker hostname |
+| `mqtt_port` | `1883` | MQTT broker port |
+| `mqtt_username` | `""` | MQTT username |
+| `mqtt_password` | `""` | MQTT password |
+| `mqtt_discovery` | `false` | Enable Home Assistant MQTT discovery |
 
-The addon provides a REST API for integration:
+## MQTT Topics
 
-- `GET /api/devices` - Get all discovered devices
-- `POST /api/devices/{mac_address}` - Add a device manually
-- `DELETE /api/devices/{mac_address}` - Remove a device
-- `POST /api/scan/start` - Start scanning
-- `POST /api/scan/stop` - Stop scanning
-- `GET /api/status` - Get addon status
-
-### Device Information
-
-Each discovered device includes:
-
-- **MAC Address**: Unique device identifier
-- **Name**: Device name (if available)
-- **RSSI**: Signal strength indicator
-- **Manufacturer**: Manufacturer data
-- **Services**: Available BLE services
-- **Last Seen**: Timestamp of last detection
-- **Proxy**: Which ESP32 proxy discovered the device
+When MQTT is enabled, the add-on publishes to:
+- `ble_scanner/data` - Device advertisement data
+- `ble_scanner/status` - Add-on status information
 
 ## Troubleshooting
 
-### Common Issues
+### ESP32 Proxy Connection Issues
+- Ensure ESP32 is running ESPHome firmware with BLE proxy enabled
+- Check network connectivity to ESP32 IP address
+- Verify port 6053 is accessible
+- Check ESP32 logs for connection errors
 
-1. **No devices discovered**:
-   - Check ESP32 proxy connectivity
-   - Verify network connectivity
-   - Ensure BLE devices are in range
-   - Check ESP32 proxy configuration
+### MQTT Connection Issues
+- The add-on auto-detects MQTT broker and credentials
+- Check Home Assistant MQTT add-on configuration
+- Verify MQTT broker is running and accessible
+- Check add-on logs for MQTT connection errors
 
-2. **Connection errors**:
-   - Verify ESP32 proxy IP addresses
-   - Check firewall settings
-   - Ensure ESP32 proxies are running
-
-3. **Web UI not loading**:
-   - Check addon logs
-   - Verify port 8099 is accessible
-   - Restart the addon
-
-### Logs
-
-View addon logs in Home Assistant:
-- Go to the addon page
-- Click "Logs" tab
-- Look for error messages or connection issues
-
-### Debug Mode
-
-Enable debug logging by setting `log_level: debug` in the configuration.
+### Web UI Issues
+- Ensure port 8099 is not blocked by firewall
+- Check add-on logs for Flask/Gunicorn errors
+- Verify add-on is running and healthy
 
 ## Development
 
-### Local Development
-
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd ble-scanner
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Run locally**:
-   ```bash
-   python main.py
-   ```
-
-### Building
-
+### Building Locally
 ```bash
-# Build for all architectures
-docker run --rm -v "$(pwd)":/data ghcr.io/hassio-addons/builder:latest --target ble-scanner --all
-
-# Build for specific architecture
-docker run --rm -v "$(pwd)":/data ghcr.io/hassio-addons/builder:latest --target ble-scanner --aarch64
+./build.sh
 ```
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+### Testing
+```bash
+python3 test_addon.py
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
 ## Support
 
-For support and questions:
-- Create an issue on GitHub
-- Check the troubleshooting section
-- Review the logs for error messages
-
-## Changelog
-
-### Version 1.0.0
-- Initial release
-- BLE device discovery via ESP32 proxies
-- Modern web UI
-- Manual device management
-- Persistent storage
-- REST API 
+For issues and feature requests, please create an issue on GitHub. 

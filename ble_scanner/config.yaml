@@ -1,6 +1,6 @@
 ---
 name: "BLE Scanner"
-version: "1.0.26"
+version: "1.0.27"
 slug: "ble_scanner"
 description: "Standalone BLE scanner with web UI for discovering and managing BLE devices"
 url: "https://github.com/bramboe/octo-mqtt-new"
@@ -24,25 +24,27 @@ panel_icon: mdi:bluetooth
 homeassistant_api: false
 options:
   esp32_proxies:
-    - host: "192.168.1.100"
+    - host: "192.168.1.109"
       port: 6053
+      password: ""
   scan_interval: 30
   log_level: info
   mqtt_host: "<auto_detect>"
-  mqtt_port: "<auto_detect>"
-  mqtt_user: "<auto_detect>"
-  mqtt_password: "<auto_detect>"
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
   mqtt_topic: "ble_scanner/data"
-  mqtt_discovery_enabled: false
+  mqtt_discovery: false
 schema:
   esp32_proxies:
     - host: str
       port: int
+      password: str
   scan_interval: int
   log_level: str
   mqtt_host: str
-  mqtt_port: str
-  mqtt_user: str
+  mqtt_port: int
+  mqtt_username: str
   mqtt_password: str
   mqtt_topic: str
-  mqtt_discovery_enabled: bool 
+  mqtt_discovery: bool 

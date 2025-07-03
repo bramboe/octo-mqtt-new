@@ -1,4 +1,4 @@
 #!/usr/bin/with-contenv bashio
 
 cd /opt/ble_scanner
-exec s6-setuidgid root gunicorn -c /opt/ble_scanner/gunicorn.conf.py main:app 
+exec s6-setuidgid root gunicorn --bind 0.0.0.0:8099 --workers 1 --timeout 120 main:app 

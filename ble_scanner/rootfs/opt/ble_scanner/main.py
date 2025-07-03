@@ -19,7 +19,7 @@ from flask import Flask, jsonify, render_template, request, render_template_stri
 from flask_cors import CORS
 import threading
 import requests
-from aioesphomeapi import APIConnection, APIConnectionError, ConnectionParams
+from aioesphomeapi import APIConnection, APIConnectionError
 from asyncio_mqtt import Client as MqttClient
 import asyncio_mqtt
 
@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.26"
+ADDON_VERSION = "1.0.27"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -95,10 +95,10 @@ class BLEScanner:
                     except (ValueError, TypeError):
                         logger.warning(f"[CONFIG] Invalid MQTT port '{mqtt_port_config}', using default 1883")
                         self.mqtt_port = 1883
-                self.mqtt_user = config.get('mqtt_user', None)
+                self.mqtt_user = config.get('mqtt_username', None)
                 self.mqtt_password = config.get('mqtt_password', None)
                 self.mqtt_topic = config.get('mqtt_topic', 'ble_scanner/data')
-                self.mqtt_discovery_enabled = config.get('mqtt_discovery_enabled', False)
+                self.mqtt_discovery_enabled = config.get('mqtt_discovery', False)
                 # Set log level
                 if log_level == 'debug':
                     logging.getLogger().setLevel(logging.DEBUG)
@@ -268,6 +268,8 @@ class BLEScanner:
                 else:
                     logger.info("[MQTT] MQTT add-on config found but no credentials - trying no auth")
                     return None, None
+            else:
+                logger.debug(f"[MQTT] MQTT add-on config request failed with status {response.status_code}")
         except Exception as e:
             logger.debug(f"[MQTT] Error getting credentials from MQTT add-on: {e}")
         
@@ -291,13 +293,13 @@ class BLEScanner:
             except Exception as e:
                 logger.debug(f"[MQTT] Error reading secrets.yaml: {e}")
         
-        # Try common default credentials
+        # Try common default credentials (start with no auth since many HA setups don't require it)
         default_credentials = [
+            (None, None),  # No authentication (most common)
             ('homeassistant', 'homeassistant'),
             ('admin', 'admin'),
             ('mqtt', 'mqtt'),
-            ('user', 'password'),
-            (None, None)  # No authentication
+            ('user', 'password')
         ]
         
         for username, password in default_credentials:
@@ -364,14 +366,13 @@ class BLEScanner:
             try:
                 logger.info(f"[PROXY] Connecting to ESP32 proxy at {proxy_key}...")
                 
-                # Use ESPHome API connection with ConnectionParams
-                params = ConnectionParams(
-                    proxy['host'],
-                    proxy.get('port', 6053),
-                    proxy.get('password', ''),
+                # Use ESPHome API connection with proper parameters
+                connection = APIConnection(
+                    address=proxy['host'],
+                    port=proxy.get('port', 6053),
+                    password=proxy.get('password', ''),
                     client_info="BLE Scanner Add-on"
                 )
-                connection = APIConnection(params)
                 
                 await connection.connect()
                 logger.info(f"[PROXY] Connected to ESP32 proxy at {proxy_key}")
@@ -509,14 +510,13 @@ class BLEScanner:
         try:
             logger.info(f"[TEST] Testing ESP32 proxy connection to {proxy_key}...")
             
-            # Try ESPHome API connection with ConnectionParams
-            params = ConnectionParams(
-                proxy['host'],
-                proxy.get('port', 6053),
-                proxy.get('password', ''),
+            # Try ESPHome API connection with proper parameters
+            connection = APIConnection(
+                address=proxy['host'],
+                port=proxy.get('port', 6053),
+                password=proxy.get('password', ''),
                 client_info="BLE Scanner Add-on Test"
             )
-            connection = APIConnection(params)
             
             await connection.connect()
             await connection.ping()

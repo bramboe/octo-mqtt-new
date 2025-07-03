@@ -4,11 +4,11 @@
 bashio::log.info "Initializing BLE Scanner addon..."
 
 # Create data directory
-mkdir -p /data/ble_devices
+mkdir -p /data
 
 # Set permissions
-chown -R root:root /data/ble_devices
-chmod -R 755 /data/ble_devices
+chown -R root:root /data
+chmod -R 755 /data
 
 # BLE scanner service will be started by s6-rc
 bashio::log.info "BLE Scanner addon initialized successfully." 

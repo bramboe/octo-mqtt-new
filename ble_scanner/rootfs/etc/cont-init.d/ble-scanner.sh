@@ -10,6 +10,5 @@ mkdir -p /data/ble_devices
 chown -R root:root /data/ble_devices
 chmod -R 755 /data/ble_devices
 
-# Start the BLE scanner service with Gunicorn
-bashio::log.info "Starting BLE Scanner service..."
-exec s6-setuidgid root gunicorn -c /opt/ble_scanner/gunicorn.conf.py main:app 
+# BLE scanner service will be started by s6-rc
+bashio::log.info "BLE Scanner addon initialized successfully." 

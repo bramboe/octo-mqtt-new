@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.22"
+ADDON_VERSION = "1.0.23"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -294,12 +294,42 @@ class BLEScanner:
             except Exception as e:
                 logger.debug(f"[MQTT] Error reading configuration.yaml: {e}")
         
+        # Try to get credentials from Home Assistant API
+        try:
+            response = requests.get("http://supervisor/core/api/config", timeout=5)
+            if response.status_code == 200:
+                config = response.json()
+                mqtt_config = config.get('mqtt', {})
+                mqtt_user = mqtt_config.get('username') or mqtt_config.get('user')
+                mqtt_password = mqtt_config.get('password') or mqtt_config.get('pass')
+                
+                if mqtt_user and mqtt_password:
+                    logger.info("[MQTT] Found MQTT credentials via Home Assistant API")
+                    return mqtt_user, mqtt_password
+        except Exception as e:
+            logger.debug(f"[MQTT] Error getting credentials from Home Assistant API: {e}")
+        
+        # Try to get credentials from MQTT add-on config
+        try:
+            response = requests.get("http://supervisor/addons/core-mosquitto/config", timeout=5)
+            if response.status_code == 200:
+                config = response.json()
+                mqtt_user = config.get('username')
+                mqtt_password = config.get('password')
+                
+                if mqtt_user and mqtt_password:
+                    logger.info("[MQTT] Found MQTT credentials from MQTT add-on config")
+                    return mqtt_user, mqtt_password
+        except Exception as e:
+            logger.debug(f"[MQTT] Error getting credentials from MQTT add-on: {e}")
+        
         # Try common default credentials
         default_credentials = [
             ('homeassistant', 'homeassistant'),
             ('admin', 'admin'),
             ('mqtt', 'mqtt'),
-            ('user', 'password')
+            ('user', 'password'),
+            (None, None)  # No authentication
         ]
         
         for username, password in default_credentials:
@@ -319,7 +349,7 @@ class BLEScanner:
                 try:
                     loop.run_until_complete(test_client.connect())
                     loop.run_until_complete(test_client.disconnect())
-                    logger.info(f"[MQTT] Found working credentials: {username}")
+                    logger.info(f"[MQTT] Found working credentials: {username or 'no auth'}")
                     return username, password
                 except Exception:
                     pass
@@ -327,7 +357,7 @@ class BLEScanner:
                     loop.close()
                     
             except Exception as e:
-                logger.debug(f"[MQTT] Failed to test credentials {username}: {e}")
+                logger.debug(f"[MQTT] Failed to test credentials {username or 'no auth'}: {e}")
                 continue
         
         logger.warning("[MQTT] Could not auto-detect MQTT credentials")
@@ -370,8 +400,7 @@ class BLEScanner:
                 connection = APIConnection(
                     proxy['host'],
                     proxy.get('port', 6053),
-                    proxy.get('password', ''),
-                    client_info="BLE Scanner Add-on"
+                    proxy.get('password', '')
                 )
                 
                 await connection.connect()
@@ -514,8 +543,7 @@ class BLEScanner:
             connection = APIConnection(
                 proxy['host'],
                 proxy.get('port', 6053),
-                proxy.get('password', ''),
-                client_info="BLE Scanner Add-on Test"
+                proxy.get('password', '')
             )
             
             await connection.connect()

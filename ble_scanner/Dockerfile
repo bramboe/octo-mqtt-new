@@ -13,10 +13,8 @@ RUN \
         python3 \
         py3-pip \
         gcc \
-        musl-dev \
         python3-dev \
         libffi-dev \
-        openssl-dev \
     \
     && pip3 install --no-cache-dir --upgrade pip \
     && rm -rf /var/cache/apk/*

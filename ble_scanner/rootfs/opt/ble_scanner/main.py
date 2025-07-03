@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.25"
+ADDON_VERSION = "1.0.26"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -366,9 +366,9 @@ class BLEScanner:
                 
                 # Use ESPHome API connection with ConnectionParams
                 params = ConnectionParams(
-                    address=proxy['host'],
-                    port=proxy.get('port', 6053),
-                    password=proxy.get('password', ''),
+                    proxy['host'],
+                    proxy.get('port', 6053),
+                    proxy.get('password', ''),
                     client_info="BLE Scanner Add-on"
                 )
                 connection = APIConnection(params)
@@ -511,9 +511,9 @@ class BLEScanner:
             
             # Try ESPHome API connection with ConnectionParams
             params = ConnectionParams(
-                address=proxy['host'],
-                port=proxy.get('port', 6053),
-                password=proxy.get('password', ''),
+                proxy['host'],
+                proxy.get('port', 6053),
+                proxy.get('password', ''),
                 client_info="BLE Scanner Add-on Test"
             )
             connection = APIConnection(params)

@@ -1,123 +1,147 @@
-# BLE Scanner Add-on for Home Assistant
+# BLE Scanner - Home Assistant Add-on
 
-A standalone BLE scanner add-on for Home Assistant that uses ESP32 BLE proxies to discover and manage Bluetooth Low Energy devices. Provides a web UI for device management and MQTT integration for Home Assistant automation.
+A Home Assistant add-on for discovering and managing BLE devices using ESP32 BLE proxies, following the [smartbed-mqtt](https://github.com/richardhopton/smartbed-mqtt) pattern.
+
+## Overview
+
+This add-on provides a web interface for discovering and managing BLE devices that are detected by ESP32 BLE proxies. It follows the same architecture as [smartbed-mqtt](https://github.com/richardhopton/smartbed-mqtt), using MQTT for communication with ESP32 BLE proxies.
 
 ## Features
 
-- **ESP32 BLE Proxy Integration**: Connect to ESP32 devices running ESPHome BLE proxy firmware
-- **Web UI**: Modern web interface for device discovery and management
-- **MQTT Integration**: Automatic MQTT broker detection and credential management
-- **Device Management**: Add, remove, and track BLE devices
-- **Real-time Scanning**: Continuous BLE device discovery
-- **Home Assistant Compatible**: Runs as a standalone add-on on Home Assistant OS
+- **MQTT-based BLE Discovery**: Listens for BLE advertisements published by ESP32 BLE proxies via MQTT
+- **Device Classification**: Automatically classifies devices based on manufacturer and service UUIDs
+- **Web UI**: Modern, responsive web interface for device management
+- **Real-time Updates**: Live updates as new BLE devices are discovered
+- **Device Persistence**: Saves discovered devices to persistent storage
+- **Auto-detection**: Automatically detects MQTT broker and credentials
+- **Smartbed-mqtt Compatibility**: Follows the same patterns as smartbed-mqtt for seamless integration
 
-## Version 1.0.27
+## How It Works
 
-### Recent Fixes
-- ✅ Fixed ESP32 proxy connection using proper APIConnection parameters
-- ✅ Improved MQTT credential auto-detection
-- ✅ Enhanced error logging and debugging
-- ✅ Updated to use asyncio-mqtt for reliable MQTT connections
-- ✅ Production-ready with Gunicorn WSGI server
+1. **ESP32 BLE Proxy**: Scans for BLE devices and publishes advertisements to MQTT
+2. **BLE Scanner Add-on**: Subscribes to MQTT topics and listens for BLE advertisements
+3. **Web UI**: Displays discovered devices in real-time with device classification
 
-## Installation
+## Configuration
 
-1. **Add this repository to Home Assistant**:
-   ```
-   https://github.com/yourusername/ble_scanner
-   ```
-
-2. **Install the BLE Scanner add-on** from the Add-on Store
-
-3. **Configure ESP32 proxies** in the add-on configuration:
-   ```yaml
-   esp32_proxies:
-     - host: "192.168.1.109"
-       port: 6053
-       password: ""
-   ```
-
-4. **Configure MQTT** (optional):
-   ```yaml
-   mqtt_host: "<auto_detect>"
-   mqtt_port: 1883
-   mqtt_username: ""
-   mqtt_password: ""
-   mqtt_discovery: false
-   ```
-
-## ESP32 BLE Proxy Setup
-
-Your ESP32 devices need to be running ESPHome firmware with BLE proxy enabled. Example configuration:
+### Basic Configuration
 
 ```yaml
-esp32_ble_proxy:
-  active: true
-  on_ble_advertise:
-    - then:
-        - logger.log: "BLE Advertisement: {{ packet }}"
+mqtt_host: "<auto_detect>"
+mqtt_port: 1883
+mqtt_username: "<auto_detect>"
+mqtt_password: "<auto_detect>"
+mqtt_discovery: false
+bleProxies:
+  - host: "192.168.1.109"
+    port: 6053
 ```
 
-## Usage
+### Configuration Options
 
-1. **Access the Web UI** at `http://your-ha-ip:8099`
-2. **Start scanning** to discover BLE devices
-3. **Add devices** to your tracking list
-4. **Monitor devices** in real-time
-5. **MQTT integration** automatically publishes device data
+- **mqtt_host**: MQTT broker hostname (use `<auto_detect>` for automatic detection)
+- **mqtt_port**: MQTT broker port (default: 1883)
+- **mqtt_username**: MQTT username (use `<auto_detect>` for automatic detection)
+- **mqtt_password**: MQTT password (use `<auto_detect>` for automatic detection)
+- **mqtt_discovery**: Enable MQTT device discovery (default: false)
+- **bleProxies**: List of ESP32 BLE proxy configurations (for reference only)
 
-## Configuration Options
+## Device Classification
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `esp32_proxies` | `[]` | List of ESP32 BLE proxy devices |
-| `mqtt_host` | `<auto_detect>` | MQTT broker hostname |
-| `mqtt_port` | `1883` | MQTT broker port |
-| `mqtt_username` | `""` | MQTT username |
-| `mqtt_password` | `""` | MQTT password |
-| `mqtt_discovery` | `false` | Enable Home Assistant MQTT discovery |
+The add-on automatically classifies BLE devices based on manufacturer and service UUIDs:
+
+- **Richmat Gen2**: Richmat/Leggett & Platt Gen2 devices
+- **Linak**: Linak bed controllers
+- **Solace**: Solace bed controllers
+- **MotoSleep**: MotoSleep bed controllers
+- **Reverie**: Reverie bed controllers
+- **Keeson**: Keeson bed controllers
+- **Octo**: Octo bed controllers
+- **Generic BLE**: Standard BLE devices
 
 ## MQTT Topics
 
-When MQTT is enabled, the add-on publishes to:
-- `ble_scanner/data` - Device advertisement data
-- `ble_scanner/status` - Add-on status information
+The add-on subscribes to the following MQTT topics for BLE advertisements:
+
+- `esphome/+/ble_advertise` - ESPHome BLE proxy format
+- `esphome/+/ble_advertise/+` - ESPHome with device ID
+- `esphome/+/ble_advertise/#` - ESPHome wildcard
+- `ble_proxy/+/advertisement` - Generic BLE proxy format
+- `esp32_ble_proxy/+/data` - Alternative format
+- `smartbed/+/ble_advertise` - Smartbed-mqtt format
+- `+/ble_advertise` - Wildcard format
+
+## Web Interface
+
+Access the web interface at `http://your-ha-ip:8099`
+
+### Features
+
+- **Real-time Status**: Shows MQTT connection and scanning status
+- **Device Discovery**: Displays all discovered BLE devices
+- **Device Details**: Shows device type, manufacturer, RSSI, and last seen time
+- **Device Management**: Add, remove, and manage devices
+- **Testing Tools**: Test MQTT connection and ESP32 proxy configuration
+
+## Smartbed-mqtt Compatibility
+
+This add-on is designed to work seamlessly with [smartbed-mqtt](https://github.com/richardhopton/smartbed-mqtt):
+
+- **Same MQTT Topics**: Uses the same MQTT topic patterns
+- **Same Device Classification**: Classifies devices using the same logic
+- **Same Architecture**: MQTT-only communication with ESP32 proxies
+- **Complementary Functionality**: Focuses on device discovery while smartbed-mqtt handles device control
+
+## Installation
+
+1. Add this repository to your Home Assistant add-ons
+2. Install the "BLE Scanner" add-on
+3. Configure your ESP32 BLE proxies and MQTT settings
+4. Start the add-on and access the web interface
 
 ## Troubleshooting
 
-### ESP32 Proxy Connection Issues
-- Ensure ESP32 is running ESPHome firmware with BLE proxy enabled
-- Check network connectivity to ESP32 IP address
-- Verify port 6053 is accessible
-- Check ESP32 logs for connection errors
+### No Devices Discovered
+
+1. **Check MQTT Connection**: Use the "Test MQTT" button in the web UI
+2. **Verify ESP32 Configuration**: Use the "Test ESP32" button to check proxy settings
+3. **Check MQTT Topics**: Ensure your ESP32 proxies are publishing to the correct topics
+4. **Start Scanning**: Click "Start Scan" to begin listening for advertisements
 
 ### MQTT Connection Issues
-- The add-on auto-detects MQTT broker and credentials
-- Check Home Assistant MQTT add-on configuration
-- Verify MQTT broker is running and accessible
-- Check add-on logs for MQTT connection errors
 
-### Web UI Issues
-- Ensure port 8099 is not blocked by firewall
-- Check add-on logs for Flask/Gunicorn errors
-- Verify add-on is running and healthy
+1. **Auto-detection**: The add-on automatically detects MQTT broker and credentials
+2. **Manual Configuration**: If auto-detection fails, manually configure MQTT settings
+3. **Network Access**: Ensure the add-on has network access to reach the MQTT broker
 
-## Development
+## Version History
 
-### Building Locally
-```bash
-./build.sh
-```
-
-### Testing
-```bash
-python3 test_addon.py
-```
-
-## License
-
-This project is licensed under the MIT License.
+- **1.0.45**: Enhanced smartbed-mqtt compatibility, improved device classification, better MQTT topic coverage
+- **1.0.44**: Added detailed logging for MQTT connection and scanning
+- **1.0.43**: Fixed MQTT connection issues with event loop handling
+- **1.0.42**: Enhanced MQTT-based BLE scanning with multiple topic subscriptions
+- **1.0.41**: Fixed build issues with aioesphomeapi dependency
+- **1.0.40**: Added direct ESP32 API connection support
+- **1.0.39**: Enhanced MQTT-based BLE scanning
+- **1.0.38**: Implemented MQTT-based BLE device discovery
+- **1.0.37**: Fixed MQTT connection with proper event loop handling
+- **1.0.36**: Switched to MQTT-only architecture matching smartbed-mqtt
+- **1.0.35**: Removed direct proxy connections, MQTT-only operation
+- **1.0.34**: Added hybrid MQTT and direct proxy support
+- **1.0.33**: Removed aioesphomeapi, MQTT-only operation
+- **1.0.32**: Fixed protobuf compatibility issues
+- **1.0.31**: Production-ready with Gunicorn and proper service management
+- **1.0.30**: Switched to asyncio-mqtt for MQTT communication
+- **1.0.29**: Fixed dependency issues and improved MQTT setup
+- **1.0.28**: Added MQTT auto-detection and credential handling
+- **1.0.27**: Refactored scan logic and improved API endpoints
+- **1.0.26**: Fixed MQTT connection and ESP32 proxy integration
+- **1.0.25**: Initial release with basic BLE scanning functionality
 
 ## Support
 
-For issues and feature requests, please create an issue on GitHub. 
+For help and support, please refer to the [smartbed-mqtt documentation](https://github.com/richardhopton/smartbed-mqtt) or create an issue in this repository.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

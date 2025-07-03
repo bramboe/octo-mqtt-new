@@ -10,6 +10,8 @@ import logging
 import os
 import sys
 import time
+import socket
+import yaml
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -29,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.43"
+ADDON_VERSION = "1.0.45"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -170,6 +172,7 @@ class BLEScanner:
                 
                 # Keep connection alive and handle messages
                 async with self.mqtt_client.messages() as messages:
+                    logger.info("[MQTT] Listening for BLE advertisements...")
                     async for message in messages:
                         await self._handle_mqtt_message(message)
                         
@@ -179,18 +182,35 @@ class BLEScanner:
                 await asyncio.sleep(10)  # Wait before retrying
 
     async def _subscribe_to_ble_topics(self):
-        """Subscribe to BLE advertisement topics"""
+        """Subscribe to BLE advertisement topics following smartbed-mqtt pattern"""
         try:
             # Subscribe to ESP32 BLE proxy topics (following smartbed-mqtt pattern)
             topics = [
-                "esphome/+/ble_advertise",  # ESPHome BLE proxy format
-                "ble_proxy/+/advertisement",  # Generic BLE proxy format
-                "esp32_ble_proxy/+/data",    # Alternative format
-                "ble_scanner/+/data",        # Our own format
-                "esphome/+/ble_advertise/+", # ESPHome with device ID
-                "esphome/+/ble_advertise/#", # ESPHome wildcard
-                "esphome/+/ble_advertise/+/+", # ESPHome with device and service
-                "esphome/+/ble_advertise/+/+/+", # ESPHome with device, service, and characteristic
+                # ESPHome BLE proxy format (most common)
+                "esphome/+/ble_advertise",
+                "esphome/+/ble_advertise/+",
+                "esphome/+/ble_advertise/#",
+                
+                # Generic BLE proxy formats
+                "ble_proxy/+/advertisement",
+                "esp32_ble_proxy/+/data",
+                "ble_scanner/+/data",
+                
+                # Smartbed-mqtt specific patterns
+                "smartbed/+/ble_advertise",
+                "smartbed/+/device/+",
+                "smartbed/+/+/advertisement",
+                
+                # Alternative ESPHome patterns
+                "esphome/+/+/ble_advertise",
+                "esphome/+/+/+/ble_advertise",
+                
+                # Wildcard patterns for maximum coverage
+                "+/ble_advertise",
+                "+/+/ble_advertise",
+                "+/+/+/ble_advertise",
+                "+/advertisement",
+                "+/+/advertisement",
             ]
             
             for topic in topics:
@@ -240,7 +260,7 @@ class BLEScanner:
             logger.error(f"[MQTT] Error processing BLE advertisement: {e}")
 
     def _extract_device_info(self, data):
-        """Extract device information from BLE advertisement data"""
+        """Extract device information from BLE advertisement data following smartbed-mqtt pattern"""
         try:
             # Handle different BLE proxy formats
             if 'address' in data:
@@ -262,9 +282,26 @@ class BLEScanner:
             
             # Extract manufacturer data
             manufacturer = data.get('manufacturer', 'Unknown')
+            manufacturer_data = data.get('manufacturer_data', {})
             
             # Extract services
             services = data.get('services', [])
+            
+            # Extract service data
+            service_data = data.get('service_data', {})
+            
+            # Classify device type based on manufacturer and services
+            device_type = self._classify_device(manufacturer, services, service_data, manufacturer_data)
+            
+            # Extract additional metadata
+            metadata = {
+                'manufacturer_data': manufacturer_data,
+                'service_data': service_data,
+                'advertisement_type': data.get('advertisement_type', 'unknown'),
+                'connectable': data.get('connectable', True),
+                'tx_power': data.get('tx_power'),
+                'flags': data.get('flags', []),
+            }
             
             return {
                 'mac_address': mac_address,
@@ -273,12 +310,68 @@ class BLEScanner:
                 'last_seen': datetime.now().isoformat(),
                 'manufacturer': manufacturer,
                 'services': services,
+                'device_type': device_type,
+                'metadata': metadata,
                 'source': 'mqtt'
             }
             
         except Exception as e:
             logger.error(f"[BLE] Error extracting device info: {e}")
             return None
+
+    def _classify_device(self, manufacturer, services, service_data, manufacturer_data):
+        """Classify device type based on manufacturer and services (following smartbed-mqtt pattern)"""
+        try:
+            # Common BLE service UUIDs for different device types
+            service_uuids = [str(s).upper() for s in services]
+            
+            # Smart bed manufacturers and services
+            if any('1800' in uuid for uuid in service_uuids):  # Generic Access
+                if any('1801' in uuid for uuid in service_uuids):  # Generic Attribute
+                    return 'generic_ble'
+                    
+            # Richmat/Leggett & Platt (Gen2)
+            if any('0000ffe0' in uuid for uuid in service_uuids):
+                return 'richmat_gen2'
+                
+            # Linak
+            if any('0000ffe0' in uuid for uuid in service_uuids) and 'linak' in manufacturer.lower():
+                return 'linak'
+                
+            # Solace
+            if any('0000ffe0' in uuid for uuid in service_uuids) and 'solace' in manufacturer.lower():
+                return 'solace'
+                
+            # MotoSleep
+            if any('0000ffe0' in uuid for uuid in service_uuids) and 'motosleep' in manufacturer.lower():
+                return 'motosleep'
+                
+            # Reverie
+            if any('0000ffe0' in uuid for uuid in service_uuids) and 'reverie' in manufacturer.lower():
+                return 'reverie'
+                
+            # Keeson
+            if any('0000ffe0' in uuid for uuid in service_uuids) and 'keeson' in manufacturer.lower():
+                return 'keeson'
+                
+            # Octo
+            if any('0000ffe0' in uuid for uuid in service_uuids) and 'octo' in manufacturer.lower():
+                return 'octo'
+                
+            # Check manufacturer data for specific patterns
+            if manufacturer_data:
+                # Add manufacturer-specific classification logic here
+                pass
+                
+            # Default classification
+            if manufacturer and manufacturer != 'Unknown':
+                return f'manufacturer_{manufacturer.lower().replace(" ", "_")}'
+            else:
+                return 'unknown'
+                
+        except Exception as e:
+            logger.error(f"[BLE] Error classifying device: {e}")
+            return 'unknown'
 
     def publish_mqtt(self, topic, message):
         """Publish message to MQTT (thread-safe wrapper)"""
@@ -305,7 +398,6 @@ class BLEScanner:
         for host in possible_hosts:
             try:
                 logger.info(f"[MQTT] Trying to connect to {host}:{self.mqtt_port}...")
-                import socket
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5)
                 result = sock.connect_ex((host, self.mqtt_port))
@@ -340,7 +432,6 @@ class BLEScanner:
         secrets_path = "/config/secrets.yaml"
         if os.path.exists(secrets_path):
             try:
-                import yaml
                 with open(secrets_path, 'r') as f:
                     secrets = yaml.safe_load(f)
                 if secrets:
@@ -438,6 +529,16 @@ class BLEScanner:
             self.scanning = True
             logger.info("[SCAN] BLE scanning started - listening for MQTT advertisements from ESP32 proxies")
             
+            # Log ESP32 proxy configuration
+            if self.bleProxies:
+                logger.info(f"[SCAN] Configured ESP32 proxies: {len(self.bleProxies)}")
+                for i, proxy in enumerate(self.bleProxies):
+                    host = proxy.get('host', proxy.get('ip'))
+                    port = proxy.get('port', 6053)
+                    logger.info(f"[SCAN] ESP32 Proxy {i+1}: {host}:{port}")
+            else:
+                logger.warning("[SCAN] No ESP32 proxies configured - add-on will only listen for MQTT advertisements")
+            
             # Publish scan start message
             if self.mqtt_connected:
                 self.publish_mqtt("ble_scanner/status", {
@@ -448,8 +549,6 @@ class BLEScanner:
             return {'status': 'started', 'message': 'BLE scanning started - listening for MQTT advertisements from ESP32 proxies'}
         else:
             return {'status': 'already_running', 'message': 'Scanning already in progress'}
-
-
 
     def stop_scan(self):
         """Stop BLE scanning"""
@@ -684,6 +783,59 @@ HTML_TEMPLATE = """
             color: #6c757d;
         }
         
+        .device-type {
+            font-size: 0.8em;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #e9ecef;
+            color: #495057;
+            display: inline-block;
+            margin-top: 4px;
+            text-transform: uppercase;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+        }
+        
+        .device-type.richmat_gen2 {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .device-type.linak {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+        
+        .device-type.solace {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .device-type.motosleep {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .device-type.reverie {
+            background: #e2e3e5;
+            color: #383d41;
+        }
+        
+        .device-type.keeson {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+        
+        .device-type.octo {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .device-type.generic_ble {
+            background: #e9ecef;
+            color: #495057;
+        }
+        
         .device-rssi {
             background: #e9ecef;
             padding: 4px 8px;
@@ -869,12 +1021,16 @@ HTML_TEMPLATE = """
                 const lastSeen = new Date(device.last_seen).toLocaleString();
                 const rssiColor = device.rssi > -50 ? '#28a745' : device.rssi > -70 ? '#ffc107' : '#dc3545';
                 
+                const deviceType = device.device_type || 'unknown';
+                const deviceTypeClass = deviceType.replace(/[^a-zA-Z0-9]/g, '_');
+                
                 return `
                     <div class="device-card">
                         <div class="device-header">
                             <div>
                                 <div class="device-name">${device.name}</div>
                                 <div class="device-mac">${device.mac_address}</div>
+                                <div class="device-type ${deviceTypeClass}">${deviceType}</div>
                             </div>
                             <div class="device-rssi" style="color: ${rssiColor}">${device.rssi} dBm</div>
                         </div>
@@ -882,6 +1038,18 @@ HTML_TEMPLATE = """
                             <div class="info-item">
                                 <div class="info-label">Last Seen</div>
                                 <div class="info-value">${lastSeen}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Manufacturer</div>
+                                <div class="info-value">${device.manufacturer || 'Unknown'}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Device Type</div>
+                                <div class="info-value">${deviceType}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Services</div>
+                                <div class="info-value">${device.services ? device.services.length : 0}</div>
                             </div>
                         </div>
                     </div>
@@ -1190,7 +1358,6 @@ def test_esp32():
             port = proxy.get('port', 6053)
             
             try:
-                import socket
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5)
                 result = sock.connect_ex((host, port))
@@ -1217,6 +1384,18 @@ def test_esp32():
             "status": "error",
             "message": str(e)
         }), 500
+
+@app.route('/api/health')
+def api_health():
+    """Health check endpoint for Home Assistant add-on monitoring"""
+    if scanner is None:
+        init_scanner()
+    return jsonify({
+        "status": "healthy",
+        "version": ADDON_VERSION,
+        "mqtt_connected": scanner.mqtt_connected if scanner else False,
+        "scanning": scanner.scanning if scanner else False
+    })
 
 @app.errorhandler(Exception)
 def handle_exception(e):

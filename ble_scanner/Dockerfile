@@ -15,6 +15,8 @@ RUN \
         gcc \
         python3-dev \
         libffi-dev \
+        musl-dev \
+        linux-headers \
     \
     && pip3 install --no-cache-dir --upgrade pip \
     && rm -rf /var/cache/apk/*

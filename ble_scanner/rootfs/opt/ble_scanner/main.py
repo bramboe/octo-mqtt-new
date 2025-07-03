@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.37"
+ADDON_VERSION = "1.0.38"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -53,6 +53,7 @@ class BLEScanner:
         self.devices = {}
         self.bleProxies = []
         self.running = True
+        self.scanning = False
         # MQTT config
         self.mqtt_host = None
         self.mqtt_port = 1883
@@ -163,13 +164,117 @@ class BLEScanner:
                 await self.mqtt_client.connect()
                 self.mqtt_connected = True
                 logger.info("[MQTT] Connected to MQTT broker")
-                # Keep connection alive
-                while self.running:
-                    await asyncio.sleep(10)
+                
+                # Subscribe to BLE advertisement topics
+                await self._subscribe_to_ble_topics()
+                
+                # Keep connection alive and handle messages
+                async with self.mqtt_client.messages() as messages:
+                    async for message in messages:
+                        await self._handle_mqtt_message(message)
+                        
             except Exception as e:
                 self.mqtt_connected = False
                 logger.error(f"[MQTT] Connection error: {e}")
                 await asyncio.sleep(10)  # Wait before retrying
+
+    async def _subscribe_to_ble_topics(self):
+        """Subscribe to BLE advertisement topics"""
+        try:
+            # Subscribe to ESP32 BLE proxy topics
+            topics = [
+                "esphome/+/ble_advertise",  # ESPHome BLE proxy format
+                "ble_proxy/+/advertisement",  # Generic BLE proxy format
+                "esp32_ble_proxy/+/data",    # Alternative format
+                "ble_scanner/+/data"         # Our own format
+            ]
+            
+            for topic in topics:
+                await self.mqtt_client.subscribe(topic)
+                logger.info(f"[MQTT] Subscribed to {topic}")
+                
+        except Exception as e:
+            logger.error(f"[MQTT] Error subscribing to BLE topics: {e}")
+
+    async def _handle_mqtt_message(self, message):
+        """Handle incoming MQTT messages from BLE proxies"""
+        try:
+            topic = message.topic.value
+            payload = message.payload.decode('utf-8')
+            
+            logger.debug(f"[MQTT] Received message on {topic}: {payload}")
+            
+            # Parse the BLE advertisement data
+            await self._process_ble_advertisement(topic, payload)
+            
+        except Exception as e:
+            logger.error(f"[MQTT] Error handling message: {e}")
+
+    async def _process_ble_advertisement(self, topic, payload):
+        """Process BLE advertisement data from MQTT"""
+        try:
+            # Try to parse JSON payload
+            data = json.loads(payload)
+            
+            # Extract device information
+            device_info = self._extract_device_info(data)
+            if device_info:
+                # Add or update device
+                mac_address = device_info['mac_address']
+                self.devices[mac_address] = device_info
+                self.save_devices()
+                
+                logger.info(f"[BLE] Discovered device: {device_info['name']} ({mac_address})")
+                
+                # Publish to MQTT if discovery is enabled
+                if self.mqtt_discovery:
+                    self.publish_mqtt(f"ble_scanner/discovered/{mac_address}", device_info)
+                    
+        except json.JSONDecodeError:
+            logger.debug(f"[MQTT] Non-JSON payload on {topic}: {payload}")
+        except Exception as e:
+            logger.error(f"[MQTT] Error processing BLE advertisement: {e}")
+
+    def _extract_device_info(self, data):
+        """Extract device information from BLE advertisement data"""
+        try:
+            # Handle different BLE proxy formats
+            if 'address' in data:
+                mac_address = data['address'].upper()
+            elif 'mac' in data:
+                mac_address = data['mac'].upper()
+            elif 'mac_address' in data:
+                mac_address = data['mac_address'].upper()
+            else:
+                return None
+                
+            # Extract device name
+            name = data.get('name', 'Unknown Device')
+            if not name or name == '':
+                name = f"BLE Device {mac_address[-6:]}"
+                
+            # Extract RSSI
+            rssi = data.get('rssi', 0)
+            
+            # Extract manufacturer data
+            manufacturer = data.get('manufacturer', 'Unknown')
+            
+            # Extract services
+            services = data.get('services', [])
+            
+            return {
+                'mac_address': mac_address,
+                'name': name,
+                'rssi': rssi,
+                'last_seen': datetime.now().isoformat(),
+                'manufacturer': manufacturer,
+                'services': services,
+                'source': 'mqtt'
+            }
+            
+        except Exception as e:
+            logger.error(f"[BLE] Error extracting device info: {e}")
+            return None
 
     def publish_mqtt(self, topic, message):
         """Publish message to MQTT (thread-safe wrapper)"""
@@ -179,9 +284,7 @@ class BLEScanner:
     async def _async_publish_mqtt(self, topic, message):
         """Async MQTT publish"""
         try:
-            await self.mqtt_client.connect()
             await self.mqtt_client.publish(topic, json.dumps(message))
-            await self.mqtt_client.disconnect()
         except Exception as e:
             logger.error(f"[MQTT] Error publishing: {e}")
 
@@ -313,6 +416,7 @@ class BLEScanner:
         return {
             'version': ADDON_VERSION,
             'running': True,
+            'scanning': self.scanning,
             'mqtt_connected': self.mqtt_connected,
             'total_proxies': len(self.bleProxies),
             'devices_count': len(self.devices)
@@ -324,13 +428,37 @@ class BLEScanner:
 
     def start_scan(self):
         """Start BLE scanning"""
-        logger.info("[SCAN] BLE scanning started")
-        return {'status': 'started'}
+        if not self.scanning:
+            self.scanning = True
+            logger.info("[SCAN] BLE scanning started - listening for MQTT advertisements")
+            
+            # Publish scan start message
+            if self.mqtt_connected:
+                self.publish_mqtt("ble_scanner/status", {
+                    "scanning": True,
+                    "timestamp": datetime.now().isoformat()
+                })
+            
+            return {'status': 'started', 'message': 'Listening for BLE advertisements via MQTT'}
+        else:
+            return {'status': 'already_running', 'message': 'Scanning already in progress'}
 
     def stop_scan(self):
         """Stop BLE scanning"""
-        logger.info("[SCAN] BLE scanning stopped")
-        return {'status': 'stopped'}
+        if self.scanning:
+            self.scanning = False
+            logger.info("[SCAN] BLE scanning stopped")
+            
+            # Publish scan stop message
+            if self.mqtt_connected:
+                self.publish_mqtt("ble_scanner/status", {
+                    "scanning": False,
+                    "timestamp": datetime.now().isoformat()
+                })
+            
+            return {'status': 'stopped', 'message': 'BLE scanning stopped'}
+        else:
+            return {'status': 'not_running', 'message': 'Scanning was not running'}
 
     def clear_devices(self):
         """Clear all devices"""
@@ -639,6 +767,10 @@ HTML_TEMPLATE = """
                 <span>MQTT: <span id="mqtt-text">Unknown</span></span>
             </div>
             <div class="status-item">
+                <div class="status-indicator" id="scan-status"></div>
+                <span>Scanning: <span id="scan-text">Stopped</span></span>
+            </div>
+            <div class="status-item">
                 <div class="status-indicator" id="proxy-status"></div>
                 <span>Proxies:</span>
                 <span id="proxy-list"></span>
@@ -647,7 +779,7 @@ HTML_TEMPLATE = """
                 <span>Devices: <span id="devices-count">0</span></span>
             </div>
             <div class="status-item">
-                <span>Version: <span id="version">1.0.20</span></span>
+                <span>Version: <span id="version">1.0.37</span></span>
             </div>
         </div>
         
@@ -683,6 +815,17 @@ HTML_TEMPLATE = """
             } else {
                 mqttStatus.className = 'status-indicator';
                 mqttText.textContent = 'Disconnected';
+            }
+            
+            // Update scanning status
+            const scanStatus = document.getElementById('scan-status');
+            const scanText = document.getElementById('scan-text');
+            if (status.scanning) {
+                scanStatus.className = 'status-indicator online';
+                scanText.textContent = 'Active';
+            } else {
+                scanStatus.className = 'status-indicator';
+                scanText.textContent = 'Stopped';
             }
             
             // Update devices count

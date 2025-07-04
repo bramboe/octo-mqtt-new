@@ -1,5 +1,8 @@
 {
   "name": "BLE Scanner Repository",
   "url": "https://github.com/bramboe/octo-mqtt-new",
-  "maintainer": "Bram Boersma <bram@example.com>"
+  "maintainer": "Bram Boersma <bram@example.com>",
+  "addons": {
+    "ble_scanner": "ble_scanner"
+  }
 }

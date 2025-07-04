@@ -42,25 +42,52 @@ def load_config():
         logger.error(f"Failed to load configuration: {e}")
         return False
 
-def get_ha_service_credentials():
-    """Try to get MQTT credentials from Home Assistant services"""
+def get_ha_mqtt_config():
+    """Get MQTT configuration from Home Assistant supervisor API - following smartbed-mqtt pattern"""
     try:
-        # Check if we can access HA supervisor services info
+        # Try to get MQTT config from Home Assistant supervisor API
         import os
         
-        # Try to read from Home Assistant services
-        if os.path.exists('/data/services.json'):
-            with open('/data/services.json', 'r') as f:
-                services = json.loads(f.read())
-                if 'mqtt' in services:
-                    mqtt_service = services['mqtt']
-                    return mqtt_service.get('username'), mqtt_service.get('password')
+        # Check if we have supervisor token
+        if os.path.exists('/data/supervisor_token'):
+            with open('/data/supervisor_token', 'r') as f:
+                token = f.read().strip()
+                
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            }
+            
+            # Try to get MQTT addon config
+            response = requests.get('http://supervisor/addons/core_mosquitto/info', 
+                                  headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                addon_info = response.json()
+                if addon_info.get('data', {}).get('options'):
+                    options = addon_info['data']['options']
+                    logger.info("✅ Found MQTT config from Home Assistant supervisor API")
+                    return {
+                        'host': options.get('host', 'core-mosquitto'),
+                        'port': options.get('port', 1883),
+                        'username': options.get('username', ''),
+                        'password': options.get('password', '')
+                    }
         
         # Try environment variables that HA might set
         mqtt_user = os.getenv('MQTT_USER') or os.getenv('MQTT_USERNAME')
         mqtt_pass = os.getenv('MQTT_PASS') or os.getenv('MQTT_PASSWORD')
+        mqtt_host = os.getenv('MQTT_HOST') or os.getenv('MQTT_BROKER')
+        mqtt_port = os.getenv('MQTT_PORT', '1883')
+        
         if mqtt_user and mqtt_pass:
-            return mqtt_user, mqtt_pass
+            logger.info("✅ Found MQTT config from environment variables")
+            return {
+                'host': mqtt_host or 'core-mosquitto',
+                'port': int(mqtt_port),
+                'username': mqtt_user,
+                'password': mqtt_pass
+            }
             
         # Try to read from typical HA locations
         ha_paths = [
@@ -80,11 +107,11 @@ def get_ha_service_credentials():
                             # Could parse YAML/JSON here but risky without proper parsing
                 except:
                     continue
-                    
+                        
     except Exception as e:
-        logger.debug(f"Could not get HA service credentials: {e}")
+        logger.debug(f"Could not get HA MQTT config: {e}")
         
-    return None, None
+    return None
 
 def setup_mqtt():
     """Setup MQTT connection using proven patterns"""
@@ -96,17 +123,40 @@ def setup_mqtt():
         
     mqtt_config = config['mqtt']
     
-    # Simple host determination - following proven patterns
-    host = mqtt_config.get('host', '').replace('<auto_detect>', '')
-    if not host:
-        # Try common HA MQTT hosts
-        hosts_to_try = ['core-mosquitto', 'localhost', 'homeassistant.local']
-    else:
-        hosts_to_try = [host]
+    # Check if we should use auto_detect
+    use_auto_detect = (
+        mqtt_config.get('host', '').replace('<auto_detect>', '') == '' or
+        mqtt_config.get('username', '').replace('<auto_detect>', '') == '' or
+        mqtt_config.get('password', '').replace('<auto_detect>', '') == ''
+    )
     
-    port = mqtt_config.get('port', 1883)
-    username = mqtt_config.get('username', '').replace('<auto_detect>', '')
-    password = mqtt_config.get('password', '').replace('<auto_detect>', '')
+    if use_auto_detect:
+        logger.info("🔍 Using <auto_detect> - fetching MQTT config from Home Assistant")
+        ha_config = get_ha_mqtt_config()
+        if ha_config:
+            logger.info(f"✅ Auto-detected MQTT config: {ha_config['host']}:{ha_config['port']}")
+            host = ha_config['host']
+            port = ha_config['port']
+            username = ha_config['username']
+            password = ha_config['password']
+        else:
+            logger.warning("⚠️ Auto-detect failed, using fallback configuration")
+            host = mqtt_config.get('host', '').replace('<auto_detect>', 'core-mosquitto')
+            port = mqtt_config.get('port', 1883)
+            username = mqtt_config.get('username', '').replace('<auto_detect>', '')
+            password = mqtt_config.get('password', '').replace('<auto_detect>', '')
+    else:
+        # Use manual configuration
+        host = mqtt_config.get('host', 'core-mosquitto')
+        port = mqtt_config.get('port', 1883)
+        username = mqtt_config.get('username', '')
+        password = mqtt_config.get('password', '')
+    
+    # Determine hosts to try
+    if host:
+        hosts_to_try = [host]
+    else:
+        hosts_to_try = ['core-mosquitto', 'localhost', 'homeassistant.local']
     
     # Try without authentication first (like many working examples)
     for host in hosts_to_try:
@@ -143,58 +193,32 @@ def setup_mqtt():
                 except:
                     pass
     
-    # Try with common Home Assistant MQTT credentials
-    common_credentials = [
-        ('homeassistant', 'homeassistant'),  # Most common HA default
-        ('mqtt', 'mqtt'),                   # Alternative common default
-        ('admin', 'admin'),                 # Another common default
-        ('', ''),                           # Try empty credentials
-        ('addons', 'addons'),               # Home Assistant add-on user
-        ('hassio', 'hassio'),               # Home Assistant supervisor user
-        ('guest', ''),                      # Guest with no password
-        ('user', 'user'),                   # Generic user
-        ('pi', 'raspberry'),                # Raspberry Pi default
-        ('mosquitto', 'mosquitto'),         # Mosquitto service account
-        ('homeassistant', ''),              # HA username with no password
-        ('admin', 'password'),              # Admin with password
-        ('home', 'assistant'),              # Split HA name
-    ]
-    
-    # Try to get credentials from Home Assistant services first
-    ha_user, ha_pass = get_ha_service_credentials()
-    if ha_user and ha_pass:
-        logger.info(f"Found Home Assistant service credentials for user: {ha_user}")
-        common_credentials.insert(0, (ha_user, ha_pass))
-    
-    # If user provided credentials, try those next
+    # Try with credentials if available
     if username and password:
-        common_credentials.insert(0, (username, password))
-    
-    for cred_user, cred_pass in common_credentials:
         for host in hosts_to_try:
             try:
-                logger.info(f"🔑 Trying MQTT {host}:{port} with credentials {cred_user}:***")
+                logger.info(f"🔑 Trying MQTT {host}:{port} with credentials {username}:***")
                 
                 mqtt_client = mqtt.Client()
                 mqtt_client.on_connect = on_mqtt_connect
                 mqtt_client.on_disconnect = on_mqtt_disconnect
                 mqtt_client.on_message = on_mqtt_message
                 
-                mqtt_client.username_pw_set(cred_user, cred_pass)
+                mqtt_client.username_pw_set(username, password)
                 mqtt_client.connect(host, port, 60)
                 mqtt_client.loop_start()
                 
                 time.sleep(2)
                 
                 if mqtt_client.is_connected():
-                    logger.info(f"✅ MQTT connected to {host}:{port} with {cred_user}:***")
+                    logger.info(f"✅ MQTT connected to {host}:{port} with {username}:***")
                     return True
                 else:
                     mqtt_client.loop_stop()
                     mqtt_client.disconnect()
-                    
+            
             except Exception as e:
-                logger.debug(f"MQTT auth {cred_user} to {host}:{port} failed: {e}")
+                logger.debug(f"MQTT auth {username} to {host}:{port} failed: {e}")
                 if mqtt_client:
                     try:
                         mqtt_client.loop_stop()
@@ -542,8 +566,8 @@ def index():
                 <button class="btn btn-primary" onclick="testProxy('{{ proxy.host }}', {{ proxy.port }})">🧪 Test</button>
             </div>
             {% endfor %}
-        </div>
-        
+    </div>
+    
         <h2>📱 Discovered BLE Devices ({{ device_count }})</h2>
         {% if devices %}
         <table>
@@ -568,7 +592,7 @@ def index():
         <div class="status warning">
             <span class="icon">⚠️</span>
             No BLE devices discovered yet. Click "Scan Now" or check proxy connectivity.
-        </div>
+                            </div>
         {% endif %}
         
         <p><em>Last updated: {{ timestamp }} | Auto-refresh in 30s</em></p>
@@ -634,7 +658,7 @@ def api_scan_now():
         message = f"Scanned {proxies_scanned} proxies, found {devices_found} new devices"
         logger.info(f"Manual scan: {message}")
         
-        return jsonify({
+    return jsonify({
             "success": True,
             "message": message,
             "proxies_scanned": proxies_scanned,
@@ -649,7 +673,7 @@ def api_scan_now():
 def api_test_proxy():
     """Test specific proxy connectivity"""
     try:
-        data = request.get_json()
+    data = request.get_json()
         host = data.get('host')
         port = data.get('port', 6053)
         
@@ -679,13 +703,13 @@ def api_clear_devices():
         
         message = f"Cleared {count} devices"
         logger.info(message)
-        
-        return jsonify({
+            
+            return jsonify({
             "success": True,
             "message": message,
             "cleared_count": count
         })
-        
+            
     except Exception as e:
         logger.error(f"Clear devices failed: {e}")
         return jsonify({"success": False, "message": str(e)}), 500

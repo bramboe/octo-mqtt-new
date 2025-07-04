@@ -18,7 +18,7 @@ from flask import Flask, jsonify, render_template_string, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.59"
+ADDON_VERSION = "1.0.60"
 
 # Global variables
 mqtt_client = None
@@ -42,54 +42,135 @@ def load_config():
         logger.error(f"Failed to load configuration: {e}")
         return False
 
+def get_ha_mqtt_config():
+    """Get Home Assistant MQTT configuration using supervisor API"""
+    try:
+        # Try to get MQTT config from Home Assistant supervisor
+        import os
+        
+        # Check if we have supervisor token
+        if os.path.exists('/data/supervisor_token'):
+            with open('/data/supervisor_token', 'r') as f:
+                token = f.read().strip()
+                
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            }
+            
+            # Try to get MQTT addon config
+            response = requests.get('http://supervisor/addons/core_mosquitto/info', 
+                                  headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                addon_info = response.json()
+                if addon_info.get('data', {}).get('state') == 'started':
+                    logger.info("Found running Mosquitto addon")
+                    return {
+                        'host': 'core-mosquitto',
+                        'port': 1883,
+                        'username': 'homeassistant',
+                        'password': None  # Use token auth
+                    }
+                    
+    except Exception as e:
+        logger.debug(f"Could not get HA MQTT config: {e}")
+        
+    return None
+
 def setup_mqtt():
-    """Setup MQTT connection"""
+    """Setup MQTT connection using smartbed-mqtt patterns"""
     global mqtt_client
     
-    if not config.get('mqtt'):
-        logger.error("No MQTT configuration found")
-        return False
-        
-    mqtt_config = config['mqtt']
+    mqtt_config = config.get('mqtt', {})
     
-    # Try multiple MQTT hosts for Home Assistant
-    possible_hosts = [
-        mqtt_config.get('host', '').replace('<auto_detect>', ''),
-        'core-mosquitto',
-        'mosquitto', 
+    # First try to get HA supervisor MQTT config
+    ha_mqtt = get_ha_mqtt_config()
+    
+    if ha_mqtt:
+        logger.info("Using Home Assistant MQTT broker configuration")
+        host = ha_mqtt['host']
+        port = ha_mqtt['port']
+        username = ha_mqtt['username']
+        password = ha_mqtt['password']
+    else:
+        # Fall back to user config or defaults
+        host = mqtt_config.get('host', 'core-mosquitto')
+        port = mqtt_config.get('port', 1883)
+        username = mqtt_config.get('username', '')
+        password = mqtt_config.get('password', '')
+        
+        # Clean up auto_detect placeholders
+        if host == '<auto_detect>' or not host:
+            host = 'core-mosquitto'
+        if username == '<auto_detect>':
+            username = ''
+        if password == '<auto_detect>':
+            password = ''
+    
+    # List of hosts to try (following smartbed-mqtt patterns)
+    hosts_to_try = [
+        host,
+        'core-mosquitto', 
+        'mosquitto',
         'homeassistant.local',
         'localhost',
-        '172.30.32.2'  # HA supervisor
+        '172.30.32.2',  # HA supervisor internal IP
+        '127.0.0.1'
     ]
     
-    # Filter out empty hosts
-    hosts_to_try = [h for h in possible_hosts if h]
+    # Remove duplicates while preserving order
+    hosts_to_try = list(dict.fromkeys(hosts_to_try))
     
-    port = mqtt_config.get('port', 1883)
-    username = mqtt_config.get('username', '').replace('<auto_detect>', '')
-    password = mqtt_config.get('password', '').replace('<auto_detect>', '')
-    
-    for host in hosts_to_try:
+    for mqtt_host in hosts_to_try:
         try:
-            logger.info(f"Trying MQTT connection to {host}:{port}")
-            mqtt_client = mqtt.Client()
+            logger.info(f"Attempting MQTT connection to {mqtt_host}:{port}")
             
+            # Create new client for each attempt
+            mqtt_client = mqtt.Client(client_id=f"ble_scanner_{ADDON_VERSION}")
+            
+            # Set credentials if available
             if username and password:
                 mqtt_client.username_pw_set(username, password)
+                logger.debug(f"Using MQTT credentials: {username}:***")
+            elif username:
+                mqtt_client.username_pw_set(username)
+                logger.debug(f"Using MQTT username: {username}")
                 
+            # Set callbacks
             mqtt_client.on_connect = on_mqtt_connect
             mqtt_client.on_disconnect = on_mqtt_disconnect
+            mqtt_client.on_message = on_mqtt_message
             
-            mqtt_client.connect(host, port, 10)  # Shorter timeout
-            mqtt_client.loop_start()
+            # Enable logging for debugging
+            mqtt_client.enable_logger(logger)
             
-            logger.info(f"MQTT client connected to {host}:{port}")
-            return True
+            # Attempt connection
+            result = mqtt_client.connect(mqtt_host, port, 60)
             
+            if result == 0:  # Success
+                mqtt_client.loop_start()
+                
+                # Wait a moment for connection to establish
+                import time
+                time.sleep(2)
+                
+                if mqtt_client.is_connected():
+                    logger.info(f"✅ MQTT connected successfully to {mqtt_host}:{port}")
+                    
+                    # Subscribe to Home Assistant birth message
+                    mqtt_client.subscribe("homeassistant/status")
+                    
+                    return True
+                else:
+                    logger.warning(f"MQTT connection to {mqtt_host}:{port} failed to establish")
+            else:
+                logger.warning(f"MQTT connection to {mqtt_host}:{port} returned code {result}")
+                
         except Exception as e:
-            logger.warning(f"MQTT connection to {host}:{port} failed: {e}")
+            logger.warning(f"MQTT connection to {mqtt_host}:{port} failed: {e}")
             
-    logger.error("All MQTT connection attempts failed")
+    logger.error("❌ All MQTT connection attempts failed")
     return False
 
 def on_mqtt_connect(client, userdata, flags, rc):
@@ -102,6 +183,21 @@ def on_mqtt_connect(client, userdata, flags, rc):
 def on_mqtt_disconnect(client, userdata, rc):
     """MQTT disconnection callback"""
     logger.warning("MQTT disconnected")
+
+def on_mqtt_message(client, userdata, message):
+    """MQTT message callback"""
+    try:
+        topic = message.topic
+        payload = message.payload.decode('utf-8')
+        
+        if topic == "homeassistant/status" and payload == "online":
+            logger.info("Home Assistant is online - republishing device discoveries")
+            # Republish all discovered devices when HA comes back online
+            for mac, device in discovered_devices.items():
+                create_mqtt_device(mac, device)
+                
+    except Exception as e:
+        logger.error(f"Error processing MQTT message: {e}")
 
 def test_ble_proxy(proxy_host, proxy_port):
     """Test BLE proxy connectivity"""
@@ -166,44 +262,100 @@ def scan_ble_proxy(proxy_host, proxy_port):
         return []
 
 def create_mqtt_device(mac_address, device_info):
-    """Create MQTT device discovery message"""
-    if not mqtt_client:
-        logger.error("MQTT client not available")
+    """Create MQTT device discovery message following smartbed-mqtt patterns"""
+    if not mqtt_client or not mqtt_client.is_connected():
+        logger.error("MQTT client not connected")
         return False
         
     try:
-        # Create Home Assistant device discovery
-        device_name = f"BLE_Device_{mac_address.replace(':', '_')}"
+        # Clean MAC for device naming (following smartbed-mqtt conventions)
+        clean_mac = mac_address.replace(':', '_').lower()
+        device_name = f"ble_device_{clean_mac}"
+        friendly_name = device_info.get('name', f"BLE Device {mac_address}")
         
-        discovery_topic = f"homeassistant/sensor/{device_name}/config"
-        state_topic = f"ble_scanner/{device_name}/state"
+        # Base discovery topic structure (like smartbed-mqtt)
+        base_topic = f"ble_scanner/{device_name}"
         
-        discovery_payload = {
-            "name": f"BLE Device {mac_address}",
-            "unique_id": f"ble_{mac_address.replace(':', '_')}",
-            "state_topic": state_topic,
-            "device": {
-                "identifiers": [mac_address],
-                "name": device_name,
-                "manufacturer": "BLE Scanner",
-                "model": "BLE Device"
-            }
+        # Device information (following HA device discovery spec)
+        device_config = {
+            "identifiers": [f"ble_scanner_{clean_mac}"],
+            "name": friendly_name,
+            "manufacturer": "BLE Scanner",
+            "model": "BLE Device",
+            "sw_version": ADDON_VERSION,
+            "via_device": "ble_scanner_addon"
         }
         
-        # Publish discovery message
-        mqtt_client.publish(discovery_topic, json.dumps(discovery_payload), retain=True)
-        
-        # Publish device state
-        state_payload = {
-            "mac": mac_address,
-            "last_seen": datetime.now().isoformat(),
-            "rssi": device_info.get('rssi', 0),
-            "name": device_info.get('name', 'Unknown')
+        # Add additional device info if available
+        if device_info.get('rssi'):
+            device_config["configuration_url"] = f"http://homeassistant.local:8123"
+            
+        # Create sensor for device presence (main entity)
+        presence_config = {
+            "name": f"{friendly_name} Presence",
+            "unique_id": f"ble_scanner_{clean_mac}_presence",
+            "state_topic": f"{base_topic}/presence",
+            "device_class": "connectivity",
+            "payload_on": "online",
+            "payload_off": "offline",
+            "device": device_config
         }
         
-        mqtt_client.publish(state_topic, json.dumps(state_payload))
+        # Create sensor for RSSI
+        rssi_config = {
+            "name": f"{friendly_name} RSSI",
+            "unique_id": f"ble_scanner_{clean_mac}_rssi",
+            "state_topic": f"{base_topic}/rssi",
+            "device_class": "signal_strength",
+            "unit_of_measurement": "dBm",
+            "state_class": "measurement",
+            "device": device_config
+        }
         
-        logger.info(f"Created MQTT device for {mac_address}")
+        # Create sensor for last seen
+        last_seen_config = {
+            "name": f"{friendly_name} Last Seen",
+            "unique_id": f"ble_scanner_{clean_mac}_last_seen",
+            "state_topic": f"{base_topic}/last_seen",
+            "device_class": "timestamp",
+            "device": device_config
+        }
+        
+        # Publish discovery messages (following smartbed-mqtt patterns)
+        mqtt_client.publish(
+            f"homeassistant/binary_sensor/{device_name}_presence/config",
+            json.dumps(presence_config),
+            retain=True
+        )
+        
+        mqtt_client.publish(
+            f"homeassistant/sensor/{device_name}_rssi/config", 
+            json.dumps(rssi_config),
+            retain=True
+        )
+        
+        mqtt_client.publish(
+            f"homeassistant/sensor/{device_name}_last_seen/config",
+            json.dumps(last_seen_config), 
+            retain=True
+        )
+        
+        # Publish current state
+        mqtt_client.publish(f"{base_topic}/presence", "online", retain=True)
+        mqtt_client.publish(f"{base_topic}/rssi", str(device_info.get('rssi', 0)), retain=True)
+        mqtt_client.publish(f"{base_topic}/last_seen", datetime.now().isoformat(), retain=True)
+        
+        # Publish attributes topic for additional info
+        attributes = {
+            "mac_address": mac_address,
+            "source": device_info.get('source', 'unknown'),
+            "discovery_time": datetime.now().isoformat(),
+            "addon_version": ADDON_VERSION
+        }
+        
+        mqtt_client.publish(f"{base_topic}/attributes", json.dumps(attributes), retain=True)
+        
+        logger.info(f"✅ Created MQTT device entities for {mac_address} ({friendly_name})")
         return True
         
     except Exception as e:
@@ -500,19 +652,43 @@ def api_clear_devices():
         return jsonify({"success": False, "message": str(e)}), 500
 
 if __name__ == '__main__':
+    logger.info("="*60)
+    logger.info(f"🔵 Starting BLE Scanner v{ADDON_VERSION}")
+    logger.info("   Following smartbed-mqtt MQTT patterns")
+    logger.info("="*60)
+    
     logger.info("=== LOADING CONFIGURATION ===")
     if not load_config():
         logger.error("Failed to load configuration, exiting")
         exit(1)
     
+    # Log configuration details
+    ble_proxies = config.get('bleProxies', [])
+    mqtt_config = config.get('mqtt', {})
+    
+    logger.info(f"📡 Configured BLE Proxies: {len(ble_proxies)}")
+    for i, proxy in enumerate(ble_proxies, 1):
+        logger.info(f"   {i}. {proxy.get('host', 'unknown')}:{proxy.get('port', 6053)}")
+        
+    logger.info(f"📮 MQTT Configuration:")
+    logger.info(f"   Host: {mqtt_config.get('host', 'auto-detect')}")
+    logger.info(f"   Port: {mqtt_config.get('port', 1883)}")
+    logger.info(f"   Discovery: {mqtt_config.get('discovery', True)}")
+    
     logger.info("=== SETTING UP MQTT ===")
-    setup_mqtt()
+    if setup_mqtt():
+        logger.info("✅ MQTT setup successful")
+    else:
+        logger.error("❌ MQTT setup failed - continuing without MQTT")
     
     logger.info("=== STARTING BLE SCANNER THREAD ===")
     scanner_thread = threading.Thread(target=ble_scanner_thread, daemon=True)
     scanner_thread.start()
+    logger.info("✅ Background scanning started")
     
     logger.info("=== STARTING FLASK SERVER ===")
+    logger.info("🌐 Web interface will be available on port 8099")
+    logger.info("="*60)
     try:
         app.run(host='0.0.0.0', port=8099, debug=False, threaded=True)
     except Exception as e:

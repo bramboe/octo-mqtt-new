@@ -1,7 +1,7 @@
 ---
 name: "BLE Scanner"
-description: "MQTT-based BLE scanner compatible with smartbed-mqtt for discovering and managing BLE devices via ESP32 proxies"
-version: "1.0.59"
+description: "MQTT-based BLE scanner compatible with smartbed-mqtt patterns for discovering and managing BLE devices via ESP32 proxies"
+version: "1.0.60"
 slug: "ble_scanner"
 init: false
 arch:

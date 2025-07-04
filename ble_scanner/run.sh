@@ -5,7 +5,7 @@
 # MQTT-based BLE scanner compatible with smartbed-mqtt
 # ==============================================================================
 
-bashio::log.info "Starting BLE Scanner Add-on v1.0.56..."
+bashio::log.info "Starting BLE Scanner Add-on v1.0.57..."
 
 # Check if the user configuration exists
 if bashio::fs.file_exists '/data/options.json'; then
@@ -15,6 +15,7 @@ else
     exit 1
 fi
 
-# Start the Python application with Gunicorn
+# DEBUGGING: Start Flask directly (bypassing Gunicorn to debug segfault)
 cd /opt/ble_scanner || exit 1
-exec gunicorn --config gunicorn.conf.py main:app 
+bashio::log.info "Running Flask directly to isolate segfault..."
+exec python3 main.py 

@@ -18,12 +18,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.52"
+ADDON_VERSION = "1.0.53"
 
 # Create Flask app (no CORS for now to test)
 app = Flask(__name__)
 
-# Log startup at module level
+# Log startup at module level - VERY OBVIOUS MESSAGE
+logger.info("="*80)
+logger.info("🔥🔥🔥 FRESH BUILD v1.0.53 - NO AIOESPHOMEAPI - MINIMAL VERSION 🔥🔥🔥")
+logger.info("="*80)
 logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} Flask app initialized")
 
 # Simple health check route (no before_request needed for now)
@@ -42,19 +45,22 @@ def index():
     """Simple index page"""
     logger.info(f"[API] Index page requested")
     return """
-    <!DOCTYPE html>
+<!DOCTYPE html>
     <html>
-    <head>
-        <title>BLE Scanner</title>
-    </head>
-    <body>
-        <h1>BLE Scanner v""" + ADDON_VERSION + """</h1>
-        <p>Status: Running</p>
-        <p>This is a minimal version to test startup stability.</p>
-        <p>If you see this page, the Flask app is working correctly!</p>
-    </body>
-    </html>
-    """
+<head>
+        <title>BLE Scanner v""" + ADDON_VERSION + """</title>
+</head>
+<body>
+        <h1>🔥 BLE Scanner v""" + ADDON_VERSION + """ - FRESH BUILD 🔥</h1>
+        <h2 style="color: green;">✅ Status: Running (NEW CODE!)</h2>
+        <p><strong>This is a minimal version to test startup stability.</strong></p>
+        <p><strong>NO aioesphomeapi imports - pure Flask only!</strong></p>
+        <p style="color: blue;">If you see this page, the NEW code is working correctly!</p>
+        <hr>
+        <p>Build: """ + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + """</p>
+</body>
+</html>
+"""
 
 @app.route('/api/status')
 def api_status():

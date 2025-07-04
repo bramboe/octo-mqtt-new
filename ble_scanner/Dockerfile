@@ -12,12 +12,11 @@ RUN \
         gcc \
         python3-dev \
         libffi-dev \
-    && pip3 install --no-cache-dir --upgrade pip \
     && rm -rf /var/cache/apk/*
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt /tmp/
-RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+RUN pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt
 
 # Create application directory
 RUN mkdir -p /opt/ble_scanner

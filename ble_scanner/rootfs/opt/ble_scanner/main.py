@@ -18,15 +18,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.51"
+ADDON_VERSION = "1.0.52"
 
 # Create Flask app (no CORS for now to test)
 app = Flask(__name__)
+
+# Log startup at module level
+logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} Flask app initialized")
 
 # Simple health check route (no before_request needed for now)
 @app.route('/api/health')
 def api_health():
     """Health check endpoint"""
+    logger.info(f"[API] Health check requested")
     return jsonify({
         "status": "healthy",
         "version": ADDON_VERSION,
@@ -36,6 +40,7 @@ def api_health():
 @app.route('/')
 def index():
     """Simple index page"""
+    logger.info(f"[API] Index page requested")
     return """
     <!DOCTYPE html>
     <html>
@@ -46,6 +51,7 @@ def index():
         <h1>BLE Scanner v""" + ADDON_VERSION + """</h1>
         <p>Status: Running</p>
         <p>This is a minimal version to test startup stability.</p>
+        <p>If you see this page, the Flask app is working correctly!</p>
     </body>
     </html>
     """

@@ -31,15 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ESP32 BLE proxy connection
-try:
-    from aioesphomeapi import APIConnection, APIConnectionError
-    ESP32_SUPPORT = True
-except ImportError:
-    ESP32_SUPPORT = False
-    logger.warning("aioesphomeapi not available - ESP32 direct connection disabled")
-
-ADDON_VERSION = "1.0.47"
+ADDON_VERSION = "1.0.48"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -73,9 +65,6 @@ class BLEScanner:
         self.mqtt_client = None
         self.mqtt_connected = False
         self.mqtt_initialized = False
-        # ESP32 connections
-        self.esp32_connections = {}
-        self.esp32_connected = False
         # Load configuration
         self.load_config()
         # MQTT will be setup after Flask app starts
@@ -517,85 +506,6 @@ class BLEScanner:
         except Exception:
             return False
 
-    async def connect_to_esp32_proxies(self):
-        """Connect to configured ESP32 BLE proxies"""
-        if not ESP32_SUPPORT:
-            logger.warning("[ESP32] aioesphomeapi not available - skipping ESP32 connections")
-            return
-            
-        for proxy in self.bleProxies:
-            host = proxy.get('host', proxy.get('ip'))
-            port = proxy.get('port', 6053)
-            password = proxy.get('password', '')
-            
-            if not host:
-                continue
-                
-            try:
-                logger.info(f"[ESP32] Connecting to {host}:{port}...")
-                connection = APIConnection(
-                    host,
-                    port,
-                    password,
-                    client_info="BLE Scanner Add-on",
-                    keepalive=15.0,
-                )
-                
-                # Start connection
-                await connection.connect(login=True)
-                logger.info(f"[ESP32] Connected to {host}:{port}")
-                
-                # Store connection
-                self.esp32_connections[host] = connection
-                self.esp32_connected = True
-                
-                # Subscribe to BLE advertisements using the correct API
-                await connection.subscribe_ble_advertisements(self._handle_esp32_ble_advertisement)
-                logger.info(f"[ESP32] Subscribed to BLE advertisements from {host}")
-                
-            except Exception as e:
-                logger.error(f"[ESP32] Failed to connect to {host}:{port}: {e}")
-                continue
-
-    async def disconnect_from_esp32_proxies(self):
-        """Disconnect from ESP32 BLE proxies"""
-        for host, connection in self.esp32_connections.items():
-            try:
-                await connection.disconnect()
-                logger.info(f"[ESP32] Disconnected from {host}")
-            except Exception as e:
-                logger.error(f"[ESP32] Error disconnecting from {host}: {e}")
-        
-        self.esp32_connections.clear()
-        self.esp32_connected = False
-
-    async def _handle_esp32_ble_advertisement(self, advertisement):
-        """Handle BLE advertisement from ESP32 proxy"""
-        try:
-            # The advertisement object structure may vary - handle it safely
-            address = getattr(advertisement, 'address', None)
-            if not address:
-                return
-                
-            # Convert ESP32 advertisement to our format
-            device_data = {
-                'address': address,
-                'name': getattr(advertisement, 'name', None) or f"BLE Device {address[-6:]}",
-                'rssi': getattr(advertisement, 'rssi', 0),
-                'manufacturer_data': getattr(advertisement, 'manufacturer_data', {}),
-                'service_data': getattr(advertisement, 'service_data', {}),
-                'service_uuids': getattr(advertisement, 'service_uuids', []),
-                'advertisement_type': getattr(advertisement, 'advertisement_type', 'unknown'),
-                'connectable': getattr(advertisement, 'connectable', True),
-                'tx_power': getattr(advertisement, 'tx_power', None),
-            }
-            
-            # Process the advertisement
-            await self._process_ble_advertisement(f"esp32_direct_{address}", json.dumps(device_data))
-            
-        except Exception as e:
-            logger.error(f"[ESP32] Error handling BLE advertisement: {e}")
-
     def get_status(self):
         """Get add-on status"""
         return {
@@ -604,8 +514,6 @@ class BLEScanner:
             'scanning': self.scanning,
             'mqtt_connected': self.mqtt_connected,
             'mqtt_host': self.mqtt_host,
-            'esp32_connected': self.esp32_connected,
-            'esp32_connections': len(self.esp32_connections),
             'total_proxies': len(self.bleProxies),
             'devices_count': len(self.devices),
             'ble_proxies': self.bleProxies
@@ -619,20 +527,17 @@ class BLEScanner:
         """Start BLE scanning"""
         if not self.scanning:
             self.scanning = True
-            logger.info("[SCAN] BLE scanning started - connecting to ESP32 proxies and listening for MQTT advertisements")
+            logger.info("[SCAN] BLE scanning started - listening for MQTT advertisements from ESP32 proxies")
             
-            # Log ESP32 proxy configuration
+            # Log ESP32 proxy configuration for reference
             if self.bleProxies:
-                logger.info(f"[SCAN] Configured ESP32 proxies: {len(self.bleProxies)}")
+                logger.info(f"[SCAN] Configured ESP32 proxies: {len(self.bleProxies)} (MQTT-only)")
                 for i, proxy in enumerate(self.bleProxies):
                     host = proxy.get('host', proxy.get('ip'))
                     port = proxy.get('port', 6053)
-                    logger.info(f"[SCAN] ESP32 Proxy {i+1}: {host}:{port}")
-                
-                # Connect to ESP32 proxies in background thread
-                threading.Thread(target=self._run_esp32_connect_loop, daemon=True).start()
+                    logger.info(f"[SCAN] ESP32 Proxy {i+1}: {host}:{port} (configured for MQTT)")
             else:
-                logger.warning("[SCAN] No ESP32 proxies configured - add-on will only listen for MQTT advertisements")
+                logger.warning("[SCAN] No ESP32 proxies configured")
             
             # Publish scan start message
             if self.mqtt_connected:
@@ -641,30 +546,15 @@ class BLEScanner:
                     "timestamp": datetime.now().isoformat()
                 })
             
-            return {'status': 'started', 'message': 'BLE scanning started - connecting to ESP32 proxies and listening for MQTT advertisements'}
+            return {'status': 'started', 'message': 'BLE scanning started - listening for MQTT advertisements from ESP32 proxies'}
         else:
             return {'status': 'already_running', 'message': 'Scanning already in progress'}
-
-    def _run_esp32_connect_loop(self):
-        """Run ESP32 connection loop in background thread"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self.connect_to_esp32_proxies())
-        except Exception as e:
-            logger.error(f"[ESP32] Error in ESP32 connection loop: {e}")
-        finally:
-            loop.close()
 
     def stop_scan(self):
         """Stop BLE scanning"""
         if self.scanning:
             self.scanning = False
             logger.info("[SCAN] BLE scanning stopped")
-            
-            # Disconnect from ESP32 proxies in background thread
-            if self.esp32_connections:
-                threading.Thread(target=self._run_esp32_disconnect_loop, daemon=True).start()
             
             # Publish scan stop message
             if self.mqtt_connected:
@@ -676,17 +566,6 @@ class BLEScanner:
             return {'status': 'stopped', 'message': 'BLE scanning stopped'}
         else:
             return {'status': 'not_running', 'message': 'Scanning was not running'}
-
-    def _run_esp32_disconnect_loop(self):
-        """Run ESP32 disconnection loop in background thread"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self.disconnect_from_esp32_proxies())
-        except Exception as e:
-            logger.error(f"[ESP32] Error in ESP32 disconnection loop: {e}")
-        finally:
-            loop.close()
 
     def clear_devices(self):
         """Clear all devices"""
@@ -1379,8 +1258,8 @@ def add_device(mac_address):
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No data provided'}), 400
-        
-    device = {
+                
+        device = {
         'mac_address': mac_address.upper(),
         'name': data.get('name', 'Unknown Device'),
         'rssi': data.get('rssi', 0),
@@ -1434,7 +1313,7 @@ def test_mqtt():
                 "mqtt_connected": scanner.mqtt_connected,
                 "mqtt_host": scanner.mqtt_host,
                 "scanning": scanner.scanning
-            })
+                        })
         else:
             return jsonify({
                 "status": "error",
@@ -1452,102 +1331,6 @@ def test_mqtt():
             "mqtt_connected": scanner.mqtt_connected,
             "mqtt_host": scanner.mqtt_host,
             "scanning": scanner.scanning
-        }), 500
-
-@app.route('/api/test/esp32', methods=['POST'])
-def test_esp32():
-    """Test ESP32 BLE proxy configuration and MQTT topics"""
-    if scanner is None:
-        init_scanner()
-    
-    try:
-        # Check ESP32 configuration
-        esp32_config = {
-            "configured_proxies": scanner.bleProxies,
-            "esp32_connected": scanner.esp32_connected,
-            "esp32_connections": len(scanner.esp32_connections),
-            "mqtt_connected": scanner.mqtt_connected,
-            "mqtt_host": scanner.mqtt_host,
-            "scanning": scanner.scanning,
-            "esp32_support": ESP32_SUPPORT,
-            "subscribed_topics": [
-                "esphome/+/ble_advertise",
-                "ble_proxy/+/advertisement", 
-                "esp32_ble_proxy/+/data",
-                "ble_scanner/+/data",
-                "esphome/+/ble_advertise/+",
-                "esphome/+/ble_advertise/#",
-                "esphome/+/ble_advertise/+/+",
-                "esphome/+/ble_advertise/+/+/+"
-            ]
-        }
-        
-        # Test if ESP32 is reachable and can connect
-        if scanner.bleProxies:
-            proxy = scanner.bleProxies[0]
-            host = proxy.get('host', proxy.get('ip'))
-            port = proxy.get('port', 6053)
-            password = proxy.get('password', '')
-            
-            # Test network connectivity
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                result = sock.connect_ex((host, port))
-                sock.close()
-                
-                if result == 0:
-                    esp32_config["esp32_reachable"] = True
-                    esp32_config["esp32_host"] = f"{host}:{port}"
-                    
-                    # Test ESP32 API connection if supported
-                    if ESP32_SUPPORT:
-                        try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            
-                            connection = APIConnection(
-                                host,
-                                port,
-                                password,
-                                client_info="BLE Scanner Test",
-                                keepalive=5.0,
-                            )
-                            
-                            loop.run_until_complete(connection.connect(login=True))
-                            loop.run_until_complete(connection.disconnect())
-                            
-                            esp32_config["esp32_api_connectable"] = True
-                            esp32_config["esp32_api_message"] = "Successfully connected to ESP32 API"
-                            
-                        except Exception as e:
-                            esp32_config["esp32_api_connectable"] = False
-                            esp32_config["esp32_api_error"] = str(e)
-                        finally:
-                            loop.close()
-                    else:
-                        esp32_config["esp32_api_connectable"] = False
-                        esp32_config["esp32_api_error"] = "aioesphomeapi not available"
-                        
-                else:
-                    esp32_config["esp32_reachable"] = False
-                    esp32_config["esp32_host"] = f"{host}:{port}"
-                    esp32_config["esp32_error"] = "Network connection failed"
-                    
-            except Exception as e:
-                esp32_config["esp32_reachable"] = False
-                esp32_config["esp32_error"] = str(e)
-        else:
-            esp32_config["esp32_reachable"] = False
-            esp32_config["esp32_error"] = "No ESP32 proxies configured"
-        
-        return jsonify(esp32_config)
-        
-    except Exception as e:
-        logger.error(f"[API] ESP32 test error: {e}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
         }), 500
 
 @app.route('/api/health')

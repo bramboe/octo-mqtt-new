@@ -1,13 +1,13 @@
 ---
 build_from:
-  aarch64: ghcr.io/hassio-addons/base/aarch64:14.0.0
-  amd64: ghcr.io/hassio-addons/base/amd64:14.0.0
-  armhf: ghcr.io/hassio-addons/base/armhf:14.0.0
-  armv7: ghcr.io/hassio-addons/base/armv7:14.0.0
-  i386: ghcr.io/hassio-addons/base/i386:14.0.0
-codenotary:
-  base_image: ghcr.io/hassio-addons/base/aarch64:14.0.0
-  signer: "notaryv2"
+  aarch64: "ghcr.io/home-assistant/aarch64-base:3.20-5.1"
+  amd64: "ghcr.io/home-assistant/amd64-base:3.20-5.1"
+  armhf: "ghcr.io/home-assistant/armhf-base:3.20-5.1"
+  armv7: "ghcr.io/home-assistant/armv7-base:3.20-5.1"
+  i386: "ghcr.io/home-assistant/i386-base:3.20-5.1"
+args:
+  TEMPIO_VERSION: "2021.09.0"
 labels:
-  io.hass.type: addon
-  io.hass.version: "1.0.47" 
+  io.hass.version: "1.0.48"
+  io.hass.type: "addon"
+  io.hass.arch: "aarch64|amd64|armhf|armv7|i386" 

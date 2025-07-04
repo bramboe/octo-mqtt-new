@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.51] - 2025-07-04
+
+### Fixed
+- **ULTRA-MINIMAL**: Created bare-bones version to isolate segfault cause
+- Removed ALL non-essential dependencies and code
+- Stripped down to basic Flask app with health check only
+- Eliminated all potential segfault sources for testing
+
+### Removed
+- Flask-CORS dependency (potential segfault cause)
+- PyYAML dependency (not needed for minimal test)
+- requests dependency (not needed for minimal test)
+- All BLE scanning functionality (temporarily for stability testing)
+- Complex routing and business logic
+
+### Purpose
+- This minimal version is for diagnosing the root cause of segfaults
+- If this works, we can gradually add features back
+- Focuses on basic HTTP service functionality only
+
 ## [1.0.50] - 2025-07-04
 
 ### Fixed

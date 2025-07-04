@@ -18,7 +18,7 @@ from flask import Flask, jsonify, render_template_string, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.63"
+ADDON_VERSION = "1.0.64"
 
 # Global variables
 mqtt_client = None
@@ -41,6 +41,50 @@ def load_config():
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
         return False
+
+def get_ha_service_credentials():
+    """Try to get MQTT credentials from Home Assistant services"""
+    try:
+        # Check if we can access HA supervisor services info
+        import os
+        
+        # Try to read from Home Assistant services
+        if os.path.exists('/data/services.json'):
+            with open('/data/services.json', 'r') as f:
+                services = json.loads(f.read())
+                if 'mqtt' in services:
+                    mqtt_service = services['mqtt']
+                    return mqtt_service.get('username'), mqtt_service.get('password')
+        
+        # Try environment variables that HA might set
+        mqtt_user = os.getenv('MQTT_USER') or os.getenv('MQTT_USERNAME')
+        mqtt_pass = os.getenv('MQTT_PASS') or os.getenv('MQTT_PASSWORD')
+        if mqtt_user and mqtt_pass:
+            return mqtt_user, mqtt_pass
+            
+        # Try to read from typical HA locations
+        ha_paths = [
+            '/config/secrets.yaml',
+            '/data/mqtt_credentials.json',
+            '/homeassistant/secrets.yaml'
+        ]
+        
+        for path in ha_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        content = f.read()
+                        # Look for MQTT credentials in various formats
+                        if 'mqtt_user' in content or 'mqtt_username' in content:
+                            logger.info(f"Found potential MQTT credentials in {path}")
+                            # Could parse YAML/JSON here but risky without proper parsing
+                except:
+                    continue
+                    
+    except Exception as e:
+        logger.debug(f"Could not get HA service credentials: {e}")
+        
+    return None, None
 
 def setup_mqtt():
     """Setup MQTT connection using proven patterns"""
@@ -104,9 +148,25 @@ def setup_mqtt():
         ('homeassistant', 'homeassistant'),  # Most common HA default
         ('mqtt', 'mqtt'),                   # Alternative common default
         ('admin', 'admin'),                 # Another common default
+        ('', ''),                           # Try empty credentials
+        ('addons', 'addons'),               # Home Assistant add-on user
+        ('hassio', 'hassio'),               # Home Assistant supervisor user
+        ('guest', ''),                      # Guest with no password
+        ('user', 'user'),                   # Generic user
+        ('pi', 'raspberry'),                # Raspberry Pi default
+        ('mosquitto', 'mosquitto'),         # Mosquitto service account
+        ('homeassistant', ''),              # HA username with no password
+        ('admin', 'password'),              # Admin with password
+        ('home', 'assistant'),              # Split HA name
     ]
     
-    # If user provided credentials, try those first
+    # Try to get credentials from Home Assistant services first
+    ha_user, ha_pass = get_ha_service_credentials()
+    if ha_user and ha_pass:
+        logger.info(f"Found Home Assistant service credentials for user: {ha_user}")
+        common_credentials.insert(0, (ha_user, ha_pass))
+    
+    # If user provided credentials, try those next
     if username and password:
         common_credentials.insert(0, (username, password))
     

@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.54"
+ADDON_VERSION = "1.0.55"
 
 # Create Flask app (no CORS for now to test)
 app = Flask(__name__)
@@ -34,7 +34,7 @@ def limit_remote_addr():
 
 # Log startup at module level - VERY OBVIOUS MESSAGE
 logger.info("="*80)
-logger.info("🔥🔥🔥 FRESH BUILD v1.0.54 - NO AIOESPHOMEAPI - MINIMAL VERSION 🔥🔥🔥")
+logger.info("🔥🔥🔥 SCHEMA FIXED v1.0.55 - PRIVILEGED LIST FORMAT 🔥🔥🔥")
 logger.info("="*80)
 logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} Flask app initialized")
 logger.info(f"[SECURITY] Ingress access restricted to 172.30.32.2 only")
@@ -61,10 +61,10 @@ def index():
         <title>BLE Scanner v""" + ADDON_VERSION + """</title>
 </head>
 <body>
-        <h1>🔥 BLE Scanner v""" + ADDON_VERSION + """ - FRESH BUILD 🔥</h1>
-        <h2 style="color: green;">✅ Status: Running (NEW CODE!)</h2>
-        <p><strong>This is a minimal version to test startup stability.</strong></p>
-        <p><strong>NO aioesphomeapi imports - pure Flask only!</strong></p>
+        <h1>🔥 BLE Scanner v""" + ADDON_VERSION + """ - SCHEMA FIXED 🔥</h1>
+        <h2 style="color: green;">✅ Status: Running (Schema Fixed!)</h2>
+        <p><strong>Fixed: privileged field now uses proper list format []</strong></p>
+        <p><strong>Minimal version - pure Flask only!</strong></p>
         <p style="color: blue;">If you see this page, the NEW code is working correctly!</p>
         <hr>
         <p>Build: """ + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + """</p>

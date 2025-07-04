@@ -38,7 +38,4 @@ schema:
     port: int(1,65535)?
     username: str?
     password: str?
-    discovery: bool?
-ports:
-  8099/tcp: 8099
-webui: "http://[HOST]:[PORT:8099]" 
+    discovery: bool? 

@@ -18,7 +18,7 @@ from flask import Flask, jsonify, render_template_string, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.62"
+ADDON_VERSION = "1.0.63"
 
 # Global variables
 mqtt_client = None
@@ -99,32 +99,42 @@ def setup_mqtt():
                 except:
                     pass
     
-    # If no auth worked, try with simple HA credentials
+    # Try with common Home Assistant MQTT credentials
+    common_credentials = [
+        ('homeassistant', 'homeassistant'),  # Most common HA default
+        ('mqtt', 'mqtt'),                   # Alternative common default
+        ('admin', 'admin'),                 # Another common default
+    ]
+    
+    # If user provided credentials, try those first
     if username and password:
+        common_credentials.insert(0, (username, password))
+    
+    for cred_user, cred_pass in common_credentials:
         for host in hosts_to_try:
             try:
-                logger.info(f"🔑 Trying MQTT with credentials: {host}:{port}")
+                logger.info(f"🔑 Trying MQTT {host}:{port} with credentials {cred_user}:***")
                 
                 mqtt_client = mqtt.Client()
                 mqtt_client.on_connect = on_mqtt_connect
                 mqtt_client.on_disconnect = on_mqtt_disconnect
                 mqtt_client.on_message = on_mqtt_message
                 
-                mqtt_client.username_pw_set(username, password)
+                mqtt_client.username_pw_set(cred_user, cred_pass)
                 mqtt_client.connect(host, port, 60)
                 mqtt_client.loop_start()
                 
                 time.sleep(2)
                 
                 if mqtt_client.is_connected():
-                    logger.info(f"✅ MQTT connected to {host}:{port} with credentials")
+                    logger.info(f"✅ MQTT connected to {host}:{port} with {cred_user}:***")
                     return True
                 else:
                     mqtt_client.loop_stop()
                     mqtt_client.disconnect()
                     
             except Exception as e:
-                logger.warning(f"MQTT auth connection to {host}:{port} failed: {e}")
+                logger.debug(f"MQTT auth {cred_user} to {host}:{port} failed: {e}")
                 if mqtt_client:
                     try:
                         mqtt_client.loop_stop()

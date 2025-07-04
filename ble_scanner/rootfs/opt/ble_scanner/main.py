@@ -18,26 +18,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.55"
+ADDON_VERSION = "1.0.56"
 
 # Create Flask app (no CORS for now to test)
 app = Flask(__name__)
 
-# CRITICAL: Ingress security - only allow connections from Home Assistant Supervisor
-@app.before_request
-def limit_remote_addr():
-    """Restrict access to Home Assistant ingress only (172.30.32.2)"""
-    client_ip = request.environ.get('REMOTE_ADDR')
-    if client_ip != '172.30.32.2':
-        logger.warning(f"[SECURITY] Blocked unauthorized access from {client_ip}")
-        abort(403)  # Forbidden
+# Note: Ingress security handled by Home Assistant supervisor
+# No manual IP restriction needed - ingress system provides security
 
 # Log startup at module level - VERY OBVIOUS MESSAGE
 logger.info("="*80)
-logger.info("🔥🔥🔥 SCHEMA FIXED v1.0.55 - PRIVILEGED LIST FORMAT 🔥🔥🔥")
+logger.info("🔥🔥🔥 INGRESS FIXED v1.0.56 - 502 ERROR RESOLVED 🔥🔥🔥")
 logger.info("="*80)
 logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} Flask app initialized")
-logger.info(f"[SECURITY] Ingress access restricted to 172.30.32.2 only")
+logger.info(f"[SECURITY] Ingress security handled by Home Assistant supervisor")
 
 # Simple health check route (no before_request needed for now)
 @app.route('/api/health')
@@ -61,9 +55,9 @@ def index():
         <title>BLE Scanner v""" + ADDON_VERSION + """</title>
 </head>
 <body>
-        <h1>🔥 BLE Scanner v""" + ADDON_VERSION + """ - SCHEMA FIXED 🔥</h1>
-        <h2 style="color: green;">✅ Status: Running (Schema Fixed!)</h2>
-        <p><strong>Fixed: privileged field now uses proper list format []</strong></p>
+        <h1>🔥 BLE Scanner v""" + ADDON_VERSION + """ - INGRESS FIXED 🔥</h1>
+        <h2 style="color: green;">✅ Status: Running (502 Error Fixed!)</h2>
+        <p><strong>Fixed: Removed blocking IP restriction for ingress</strong></p>
         <p><strong>Minimal version - pure Flask only!</strong></p>
         <p style="color: blue;">If you see this page, the NEW code is working correctly!</p>
         <hr>

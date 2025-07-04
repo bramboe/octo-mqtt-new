@@ -24,14 +24,6 @@ import requests
 from asyncio_mqtt import Client as MqttClient
 import asyncio_mqtt
 
-# ESP32 BLE proxy connection
-try:
-    from aioesphomeapi import APIConnection, APIConnectionError, BLEAdvertisement
-    ESP32_SUPPORT = True
-except ImportError:
-    ESP32_SUPPORT = False
-    logger.warning("aioesphomeapi not available - ESP32 direct connection disabled")
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +31,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.46"
+# ESP32 BLE proxy connection
+try:
+    from aioesphomeapi import APIConnection, APIConnectionError
+    ESP32_SUPPORT = True
+except ImportError:
+    ESP32_SUPPORT = False
+    logger.warning("aioesphomeapi not available - ESP32 direct connection disabled")
+
+ADDON_VERSION = "1.0.47"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -549,7 +549,7 @@ class BLEScanner:
                 self.esp32_connections[host] = connection
                 self.esp32_connected = True
                 
-                # Subscribe to BLE advertisements
+                # Subscribe to BLE advertisements using the correct API
                 await connection.subscribe_ble_advertisements(self._handle_esp32_ble_advertisement)
                 logger.info(f"[ESP32] Subscribed to BLE advertisements from {host}")
                 
@@ -569,24 +569,29 @@ class BLEScanner:
         self.esp32_connections.clear()
         self.esp32_connected = False
 
-    async def _handle_esp32_ble_advertisement(self, advertisement: BLEAdvertisement):
+    async def _handle_esp32_ble_advertisement(self, advertisement):
         """Handle BLE advertisement from ESP32 proxy"""
         try:
+            # The advertisement object structure may vary - handle it safely
+            address = getattr(advertisement, 'address', None)
+            if not address:
+                return
+                
             # Convert ESP32 advertisement to our format
             device_data = {
-                'address': advertisement.address,
-                'name': advertisement.name or f"BLE Device {advertisement.address[-6:]}",
-                'rssi': advertisement.rssi,
-                'manufacturer_data': advertisement.manufacturer_data,
-                'service_data': advertisement.service_data,
-                'service_uuids': advertisement.service_uuids,
-                'advertisement_type': advertisement.advertisement_type,
-                'connectable': advertisement.connectable,
-                'tx_power': advertisement.tx_power,
+                'address': address,
+                'name': getattr(advertisement, 'name', None) or f"BLE Device {address[-6:]}",
+                'rssi': getattr(advertisement, 'rssi', 0),
+                'manufacturer_data': getattr(advertisement, 'manufacturer_data', {}),
+                'service_data': getattr(advertisement, 'service_data', {}),
+                'service_uuids': getattr(advertisement, 'service_uuids', []),
+                'advertisement_type': getattr(advertisement, 'advertisement_type', 'unknown'),
+                'connectable': getattr(advertisement, 'connectable', True),
+                'tx_power': getattr(advertisement, 'tx_power', None),
             }
             
             # Process the advertisement
-            await self._process_ble_advertisement(f"esp32_direct_{advertisement.address}", json.dumps(device_data))
+            await self._process_ble_advertisement(f"esp32_direct_{address}", json.dumps(device_data))
             
         except Exception as e:
             logger.error(f"[ESP32] Error handling BLE advertisement: {e}")

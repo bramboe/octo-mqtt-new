@@ -24,7 +24,7 @@ options:
       password: ""
   mqtt:
     host: "<auto_detect>"
-    port: "<auto_detect>"
+    port: 1883
     username: "<auto_detect>"
     password: "<auto_detect>"
     discovery: true

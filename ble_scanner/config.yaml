@@ -10,13 +10,14 @@ arch:
   - armhf
   - armv7
   - i386
+startup: application
 hassio_api: true
 homeassistant_api: true
 host_network: true
 privileged:
   - NET_ADMIN
   - SYS_ADMIN
-boot: "auto"
+boot: auto
 options:
   bleProxies:
     - host: "192.168.1.109"
@@ -41,4 +42,4 @@ schema:
     discovery: bool?
 ports:
   8099/tcp: 8099
-webui: "[PROTO:ssl]://[HOST]:[PORT:8099]" 
+webui: "http://[HOST]:[PORT:8099]" 

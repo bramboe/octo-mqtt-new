@@ -1,4 +1,0 @@
-#!/usr/bin/with-contenv bashio
-
-cd /opt/ble_scanner
-exec s6-setuidgid root gunicorn --config gunicorn.conf.py main:app 

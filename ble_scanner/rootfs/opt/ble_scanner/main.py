@@ -77,17 +77,37 @@ class BLEScanner:
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     config = json.load(f)
+                
+                # Load BLE proxies
                 self.bleProxies = config.get('bleProxies', [])
-                self.mqtt_host = config.get('mqtt_host', '<auto_detect>')
-                self.mqtt_port = int(config.get('mqtt_port', 1883))
-                self.mqtt_username = config.get('mqtt_username', '')
-                self.mqtt_password = config.get('mqtt_password', '')
-                self.mqtt_discovery = config.get('mqtt_discovery', False)
+                
+                # Load MQTT config (new nested structure)
+                mqtt_config = config.get('mqtt', {})
+                self.mqtt_host = mqtt_config.get('host', '') or '<auto_detect>'
+                self.mqtt_port = int(mqtt_config.get('port', 1883))
+                self.mqtt_username = mqtt_config.get('username', '') or '<auto_detect>'
+                self.mqtt_password = mqtt_config.get('password', '') or '<auto_detect>'
+                self.mqtt_discovery = mqtt_config.get('discovery', False)
+                
                 logger.info(f"[CONFIG] Loaded: {len(self.bleProxies)} BLE proxies, MQTT host: {self.mqtt_host}, MQTT port: {self.mqtt_port}, MQTT discovery: {self.mqtt_discovery}")
             else:
                 logger.warning("[CONFIG] No configuration file found, using defaults")
+                # Set defaults
+                self.bleProxies = []
+                self.mqtt_host = '<auto_detect>'
+                self.mqtt_port = 1883
+                self.mqtt_username = '<auto_detect>'
+                self.mqtt_password = '<auto_detect>'
+                self.mqtt_discovery = False
         except Exception as e:
             logger.error(f"[CONFIG] Error loading configuration: {e}")
+            # Set defaults on error
+            self.bleProxies = []
+            self.mqtt_host = '<auto_detect>'
+            self.mqtt_port = 1883
+            self.mqtt_username = '<auto_detect>'
+            self.mqtt_password = '<auto_detect>'
+            self.mqtt_discovery = False
     
     def save_devices(self):
         """Save devices to persistent storage"""

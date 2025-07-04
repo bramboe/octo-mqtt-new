@@ -1,7 +1,7 @@
 ---
 name: "BLE Scanner"
 description: "MQTT-based BLE scanner compatible with smartbed-mqtt for discovering and managing BLE devices via ESP32 proxies"
-version: "1.0.48"
+version: "1.0.49"
 slug: "ble_scanner"
 init: false
 arch:
@@ -13,10 +13,9 @@ arch:
 startup: application
 hassio_api: true
 homeassistant_api: true
-host_network: true
-privileged:
-  - NET_ADMIN
-  - SYS_ADMIN
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:bluetooth
 boot: auto
 options:
   bleProxies:

@@ -15,6 +15,6 @@ else
     exit 1
 fi
 
-# Start the Python application
+# Start the Python application with Gunicorn
 cd /opt/ble_scanner || exit 1
-exec python3 -u main.py 
+exec gunicorn --config gunicorn.conf.py main:app 

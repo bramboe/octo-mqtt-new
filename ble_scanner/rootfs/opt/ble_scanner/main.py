@@ -31,11 +31,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.48"
+ADDON_VERSION = "1.0.49"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
 CORS(app)
+
+# Ingress security - only allow connections from Home Assistant ingress proxy
+@app.before_request
+def check_ingress():
+    """Check if request is from Home Assistant ingress proxy"""
+    if request.remote_addr != '172.30.32.2':
+        return jsonify({'error': 'Access denied'}), 403
 
 # Global scanner instance
 scanner = None

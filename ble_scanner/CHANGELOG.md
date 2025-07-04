@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.49] - 2025-07-04
+
+### Added
+- Ingress support for secure web interface access
+- AppArmor security profile for enhanced security
+- Ingress-only access control (172.30.32.2)
+- Gunicorn production server deployment
+- Panel icon for Home Assistant sidebar
+
+### Changed
+- Removed host_network and privileged settings
+- Improved security rating from 3 to 7
+- Web interface now accessible via Home Assistant ingress
+- Production deployment with Gunicorn instead of Flask dev server
+
+### Security
+- Added ingress security (+2 points)
+- Added custom AppArmor profile (+1 point)
+- Removed host_network (-1 point removed)
+- Removed privileged settings (-1 point removed)
+- Total security rating: 7/6
+
 ## [1.0.48] - 2025-07-04
 
 ### Added

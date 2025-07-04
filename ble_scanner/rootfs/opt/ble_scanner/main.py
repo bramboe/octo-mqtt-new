@@ -18,7 +18,7 @@ from flask import Flask, jsonify, render_template_string, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.61"
+ADDON_VERSION = "1.0.62"
 
 # Global variables
 mqtt_client = None
@@ -43,99 +43,109 @@ def load_config():
         return False
 
 def setup_mqtt():
-    """Setup MQTT connection - exactly copied from smartbed-mqtt patterns"""
+    """Setup MQTT connection using proven patterns"""
     global mqtt_client
     
-    try:
-        logger.info("🔄 Setting up MQTT connection...")
+    if not config.get('mqtt'):
+        logger.error("No MQTT configuration found")
+        return False
         
-        # Simple MQTT setup like smartbed-mqtt - no complex authentication
-        mqtt_client = mqtt.Client(client_id=f"ble_scanner_{ADDON_VERSION}")
-        
-        # Set callbacks
-        mqtt_client.on_connect = on_mqtt_connect
-        mqtt_client.on_disconnect = on_mqtt_disconnect
-        mqtt_client.on_message = on_mqtt_message
-        
-        # List of MQTT hosts to try (smartbed-mqtt style)
-        mqtt_hosts = [
-            'core-mosquitto',
-            'localhost', 
-            '127.0.0.1',
-            'homeassistant.local',
-            '172.30.32.2'
-        ]
-        
-        for mqtt_host in mqtt_hosts:
+    mqtt_config = config['mqtt']
+    
+    # Simple host determination - following proven patterns
+    host = mqtt_config.get('host', '').replace('<auto_detect>', '')
+    if not host:
+        # Try common HA MQTT hosts
+        hosts_to_try = ['core-mosquitto', 'localhost', 'homeassistant.local']
+    else:
+        hosts_to_try = [host]
+    
+    port = mqtt_config.get('port', 1883)
+    username = mqtt_config.get('username', '').replace('<auto_detect>', '')
+    password = mqtt_config.get('password', '').replace('<auto_detect>', '')
+    
+    # Try without authentication first (like many working examples)
+    for host in hosts_to_try:
+        try:
+            logger.info(f"🔗 Trying MQTT broker: {host}:{port}")
+            
+            # Create new client
+            mqtt_client = mqtt.Client()
+            mqtt_client.on_connect = on_mqtt_connect
+            mqtt_client.on_disconnect = on_mqtt_disconnect
+            mqtt_client.on_message = on_mqtt_message
+            
+            # Try connecting without authentication first
+            mqtt_client.connect(host, port, 60)
+            mqtt_client.loop_start()
+            
+            # Wait a moment to see if connection succeeds
+            time.sleep(2)
+            
+            if mqtt_client.is_connected():
+                logger.info(f"✅ MQTT connected to {host}:{port} (no auth)")
+                return True
+            else:
+                logger.warning(f"Failed to connect to {host}:{port} without auth")
+                mqtt_client.loop_stop()
+                mqtt_client.disconnect()
+                
+        except Exception as e:
+            logger.warning(f"MQTT connection to {host}:{port} failed: {e}")
+            if mqtt_client:
+                try:
+                    mqtt_client.loop_stop()
+                    mqtt_client.disconnect()
+                except:
+                    pass
+    
+    # If no auth worked, try with simple HA credentials
+    if username and password:
+        for host in hosts_to_try:
             try:
-                logger.info(f"🔗 Trying MQTT broker: {mqtt_host}:1883")
+                logger.info(f"🔑 Trying MQTT with credentials: {host}:{port}")
                 
-                # Try connection WITHOUT authentication first (like smartbed-mqtt)
-                result = mqtt_client.connect(mqtt_host, 1883, 60)
-                
-                if result == 0:
-                    mqtt_client.loop_start()
-                    
-                    # Give it time to connect
-                    import time
-                    time.sleep(3)
-                    
-                    if mqtt_client.is_connected():
-                        logger.info(f"✅ MQTT connected to {mqtt_host}:1883 (no auth)")
-                        
-                        # Subscribe to Home Assistant status
-                        mqtt_client.subscribe("homeassistant/status")
-                        return True
-                    else:
-                        logger.debug(f"Connection to {mqtt_host} timed out")
-                        
-            except Exception as e:
-                logger.debug(f"MQTT {mqtt_host} failed: {e}")
-                continue
-                
-        # If no auth failed, try with basic HA credentials
-        logger.info("🔑 Trying MQTT with Home Assistant credentials...")
-        
-        for mqtt_host in ['core-mosquitto', 'localhost']:
-            try:
-                logger.info(f"🔗 Trying {mqtt_host} with HA auth...")
-                
-                mqtt_client = mqtt.Client(client_id=f"ble_scanner_{ADDON_VERSION}")
+                mqtt_client = mqtt.Client()
                 mqtt_client.on_connect = on_mqtt_connect
                 mqtt_client.on_disconnect = on_mqtt_disconnect
                 mqtt_client.on_message = on_mqtt_message
                 
-                # Try common HA MQTT credentials
-                mqtt_client.username_pw_set("homeassistant", "homeassistant")
+                mqtt_client.username_pw_set(username, password)
+                mqtt_client.connect(host, port, 60)
+                mqtt_client.loop_start()
                 
-                result = mqtt_client.connect(mqtt_host, 1883, 60)
+                time.sleep(2)
                 
-                if result == 0:
-                    mqtt_client.loop_start()
+                if mqtt_client.is_connected():
+                    logger.info(f"✅ MQTT connected to {host}:{port} with credentials")
+                    return True
+                else:
+                    mqtt_client.loop_stop()
+                    mqtt_client.disconnect()
                     
-                    import time
-                    time.sleep(3)
-                    
-                    if mqtt_client.is_connected():
-                        logger.info(f"✅ MQTT connected to {mqtt_host}:1883 (with auth)")
-                        mqtt_client.subscribe("homeassistant/status")
-                        return True
-                        
             except Exception as e:
-                logger.debug(f"MQTT auth attempt {mqtt_host} failed: {e}")
-                continue
-                
-        logger.error("❌ All MQTT connection attempts failed")
-        return False
-        
-    except Exception as e:
-        logger.error(f"❌ MQTT setup error: {e}")
-        return False
+                logger.warning(f"MQTT auth connection to {host}:{port} failed: {e}")
+                if mqtt_client:
+                    try:
+                        mqtt_client.loop_stop()
+                        mqtt_client.disconnect()
+                    except:
+                        pass
+
+    logger.error("❌ All MQTT connection attempts failed")
+    mqtt_client = None
+    return False
 
 def on_mqtt_connect(client, userdata, flags, rc):
     """MQTT connection callback"""
     if rc == 0:
-        logger.info("MQTT connected successfully")
+        logger.info("✅ MQTT connected successfully")
+        # Subscribe to Home Assistant status for device republishing
+        try:
+            client.subscribe("homeassistant/status")
+            logger.info("📡 Subscribed to Home Assistant status updates")
+        except Exception as e:
+            logger.warning(f"Failed to subscribe to HA status: {e}")
     else:
         logger.error(f"MQTT connection failed with code {rc}")
 

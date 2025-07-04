@@ -9,7 +9,7 @@ import os
 import time
 from datetime import datetime
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, abort
 
 # Configure logging
 logging.basicConfig(
@@ -23,11 +23,21 @@ ADDON_VERSION = "1.0.54"
 # Create Flask app (no CORS for now to test)
 app = Flask(__name__)
 
+# CRITICAL: Ingress security - only allow connections from Home Assistant Supervisor
+@app.before_request
+def limit_remote_addr():
+    """Restrict access to Home Assistant ingress only (172.30.32.2)"""
+    client_ip = request.environ.get('REMOTE_ADDR')
+    if client_ip != '172.30.32.2':
+        logger.warning(f"[SECURITY] Blocked unauthorized access from {client_ip}")
+        abort(403)  # Forbidden
+
 # Log startup at module level - VERY OBVIOUS MESSAGE
 logger.info("="*80)
-logger.info("🔥🔥🔥 FRESH BUILD v1.0.53 - NO AIOESPHOMEAPI - MINIMAL VERSION 🔥🔥🔥")
+logger.info("🔥🔥🔥 FRESH BUILD v1.0.54 - NO AIOESPHOMEAPI - MINIMAL VERSION 🔥🔥🔥")
 logger.info("="*80)
 logger.info(f"[STARTUP] BLE Scanner Add-on v{ADDON_VERSION} Flask app initialized")
+logger.info(f"[SECURITY] Ingress access restricted to 172.30.32.2 only")
 
 # Simple health check route (no before_request needed for now)
 @app.route('/api/health')

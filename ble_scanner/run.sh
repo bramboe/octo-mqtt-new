@@ -5,7 +5,7 @@
 # MQTT-based BLE scanner compatible with smartbed-mqtt
 # ==============================================================================
 
-bashio::log.info "Starting BLE Scanner Add-on v1.0.52..."
+bashio::log.info "Starting BLE Scanner Add-on v1.0.54..."
 
 # Check if the user configuration exists
 if bashio::fs.file_exists '/data/options.json'; then

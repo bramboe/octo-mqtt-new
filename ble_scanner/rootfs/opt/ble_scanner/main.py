@@ -18,7 +18,7 @@ from flask import Flask, jsonify, render_template_string, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.64"
+ADDON_VERSION = "1.0.65"
 
 # Global variables
 mqtt_client = None

@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.53"
+ADDON_VERSION = "1.0.54"
 
 # Create Flask app (no CORS for now to test)
 app = Flask(__name__)

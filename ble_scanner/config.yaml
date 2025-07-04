@@ -1,7 +1,7 @@
 ---
 name: "BLE Scanner"
 description: "MQTT-based BLE scanner compatible with smartbed-mqtt for discovering and managing BLE devices via ESP32 proxies"
-version: "1.0.53"
+version: "1.0.54"
 slug: "ble_scanner"
 init: false
 arch:
@@ -17,6 +17,13 @@ ingress: true
 ingress_port: 8099
 panel_icon: mdi:bluetooth
 boot: auto
+# Security restrictions for high rating
+host_network: false
+privileged: false
+full_access: false
+devices: []
+ports: {}
+tmpfs: false
 options:
   bleProxies:
     - host: "192.168.1.109"

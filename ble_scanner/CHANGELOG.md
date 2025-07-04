@@ -53,4 +53,4 @@ All notable changes to this project will be documented in this file.
 ### Removed
 - Direct ESP32 BLE proxy connections
 - Complex s6-overlay service management
-- Unused dependencies and imports 
+- Unused dependencies and imports

@@ -23,19 +23,19 @@ options:
       port: 6053
       password: ""
   mqtt:
-    host: ""
-    port: 1883
-    username: ""
-    password: ""
+    host: "<auto_detect>"
+    port: "<auto_detect>"
+    username: "<auto_detect>"
+    password: "<auto_detect>"
     discovery: true
 schema:
   bleProxies:
     - host: str
-      port: int(1,65535)?
-      password: str?
+      port: "int(1,65535)?"
+      password: "str?"
   mqtt:
-    host: str?
-    port: int(1,65535)?
-    username: str?
-    password: str?
-    discovery: bool? 
+    host: "str?"
+    port: "int(1,65535)?"
+    username: "str?"
+    password: "str?"
+    discovery: "bool?" 

@@ -1,154 +1,92 @@
-# BLE Scanner Add-on Documentation
-
-## About
-
-The BLE Scanner Add-on is a MQTT-based BLE device scanner that's fully compatible with [smartbed-mqtt](https://github.com/richardhopton/smartbed-mqtt). It discovers BLE devices via ESP32 proxies and integrates them into Home Assistant through MQTT discovery.
-
-## How it works
-
-1. **ESP32 BLE Proxy** scans for BLE devices and publishes advertisements to MQTT
-2. **BLE Scanner** subscribes to MQTT topics and processes the advertisements  
-3. **Home Assistant** discovers devices via MQTT discovery protocol
-4. **Web UI** provides real-time monitoring and device management
-
-This is the exact same architecture used by smartbed-mqtt, ensuring full compatibility.
+# Home Assistant Add-on: BLE Scanner
 
 ## Installation
 
-1. Add this repository to your Home Assistant add-on store
+1. Add this repository to your Home Assistant add-ons
 2. Install the "BLE Scanner" add-on
-3. Configure your ESP32 BLE proxy details
-4. Start the add-on
-5. Access the web UI to monitor discovered devices
+3. Configure your MQTT settings (auto-detection available)
+4. Configure your ESP32 BLE proxy settings
+5. Start the add-on
 
 ## Configuration
 
-### Example configuration:
+### MQTT Settings
+
+```yaml
+mqtt:
+  host: "<auto_detect>"
+  port: 1883
+  username: "<auto_detect>"
+  password: "<auto_detect>"
+  discovery: false
+```
+
+- **host**: MQTT broker hostname (use `<auto_detect>` for automatic detection)
+- **port**: MQTT broker port (default: 1883)
+- **username**: MQTT username (use `<auto_detect>` for automatic detection) 
+- **password**: MQTT password (use `<auto_detect>` for automatic detection)
+- **discovery**: Enable MQTT device discovery (default: false)
+
+### BLE Proxy Configuration
 
 ```yaml
 bleProxies:
   - host: "192.168.1.109"
     port: 6053
     password: ""
-mqtt:
-  host: ""                    # Leave empty for auto-detection
-  port: 1883
-  username: ""               # Leave empty for auto-detection  
-  password: ""               # Leave empty for auto-detection
-  discovery: true
 ```
 
-### Configuration Options
+- **host**: IP address of your ESP32 BLE proxy
+- **port**: Port number (usually 6053)
+- **password**: Password for ESP32 connection (if required)
 
-#### `bleProxies` (required)
-List of ESP32 BLE proxy configurations. These proxies will publish BLE advertisements to MQTT.
+## Usage
 
-- **host** (string): IP address of your ESP32 BLE proxy
-- **port** (integer, optional): Port number (default: 6053)  
-- **password** (string, optional): Password for ESP32 proxy (if configured)
-
-#### `mqtt` (optional)
-MQTT broker configuration. Leave fields empty for auto-detection.
-
-- **host** (string, optional): MQTT broker hostname (auto-detected if empty)
-- **port** (integer, optional): MQTT broker port (default: 1883)
-- **username** (string, optional): MQTT username (auto-detected if empty)
-- **password** (string, optional): MQTT password (auto-detected if empty)
-- **discovery** (boolean, optional): Enable MQTT discovery for Home Assistant (default: true)
-
-## ESP32 BLE Proxy Setup
-
-Your ESP32 BLE proxy should be configured to publish BLE advertisements to MQTT. The add-on subscribes to these standard topic patterns:
-
-- `esphome/+/ble_advertise`
-- `ble_proxy/+/advertisement`
-- `esp32_ble_proxy/+/data`
-- And many other patterns for maximum compatibility
-
-## Supported Device Types
-
-The add-on automatically classifies smart bed devices from these manufacturers:
-
-- **Richmat**: RTS remote bed bases
-- **Linak**: DeskLine and medical beds  
-- **Solace**: Solace smart beds
-- **MotoSleep**: MotoSleep adjustable beds
-- **Reverie**: Reverie smart beds
-- **Keeson**: Member's Mark, Purple, ErgoMotion beds
-- **Octo**: Octo smart bed systems
-
-## Web Interface
-
-Access the web UI at: `http://homeassistant.local:8099`
-
-Features:
-- Real-time device discovery monitoring
-- Device classification and details
-- MQTT connection status
-- Manual device management
-- Diagnostic tools
+1. **Access the Web Interface**: The addon provides a web interface accessible through Home Assistant's sidebar
+2. **Start Scanning**: Click "Start Scan" to begin listening for BLE advertisements via MQTT
+3. **View Devices**: Discovered BLE devices will appear in real-time
+4. **Device Management**: Add, remove, and classify devices through the interface
 
 ## MQTT Topics
 
-### Subscribed Topics (Input)
-The add-on listens for BLE advertisements on these patterns:
-- `esphome/+/ble_advertise`
-- `ble_proxy/+/advertisement`
-- `smartbed/+/ble_advertise`
-- And many other patterns
+The add-on subscribes to these MQTT topics for BLE advertisements:
 
-### Published Topics (Output)
-When discovery is enabled:
-- `ble_scanner/discovered/{mac}`: Device discovery notifications
-- `ble_scanner/status`: Scanner status updates
+- `esphome/+/ble_advertise`
+- `esphome/+/ble_advertise/+` 
+- `esphome/+/ble_advertise/#`
+- `ble_proxy/+/advertisement`
+- `esp32_ble_proxy/+/data`
+- `smartbed/+/ble_advertise`
+
+## Device Classification
+
+Automatically classifies devices by manufacturer:
+
+- **Richmat Gen2**: Richmat/Leggett & Platt Gen2 devices
+- **Linak**: Linak bed controllers
+- **Solace**: Solace bed controllers  
+- **MotoSleep**: MotoSleep bed controllers
+- **Reverie**: Reverie bed controllers
+- **Keeson**: Keeson bed controllers
+- **Octo**: Octo bed controllers
+- **Generic BLE**: Standard BLE devices
 
 ## Troubleshooting
 
-### Add-on won't start
-1. Check the add-on logs for error messages
-2. Verify your configuration syntax
-3. Ensure ESP32 proxy is reachable
+### No Devices Discovered
 
-### No devices discovered
-1. Verify ESP32 BLE proxy is running and scanning
-2. Check MQTT broker connectivity
-3. Confirm ESP32 is publishing to correct MQTT topics
-4. Use the web UI diagnostic tools
+1. Check MQTT connection status in the web interface
+2. Verify ESP32 BLE proxy is publishing to correct MQTT topics
+3. Ensure MQTT broker is accessible
+4. Start scanning if not already active
 
-### MQTT connection issues
-1. Check MQTT broker is running (usually Mosquitto add-on)
-2. Verify network connectivity
-3. Check MQTT credentials if required
-4. Use auto-detection by leaving MQTT fields empty
+### MQTT Connection Issues
 
-## API Endpoints
-
-The add-on provides a REST API:
-
-- `GET /api/status`: Get add-on status
-- `GET /api/devices`: Get discovered devices
-- `POST /api/scan/start`: Start scanning
-- `POST /api/scan/stop`: Stop scanning
-- `POST /api/devices/clear`: Clear all devices
-- `GET /api/diagnostic`: Get diagnostic information
-
-## Security
-
-This add-on follows Home Assistant security best practices:
-
-- Host network access for MQTT communication
-- No unnecessary privileges
-- Secure MQTT auto-detection
-- Standard Home Assistant configuration patterns
+1. Try auto-detection by setting host to `<auto_detect>`
+2. Manually configure MQTT broker details
+3. Check network connectivity between addon and MQTT broker
+4. Verify MQTT credentials
 
 ## Support
 
-For issues and support:
-1. Check the add-on logs first
-2. Review this documentation  
-3. Open an issue on the GitHub repository
-4. Join the Home Assistant community forums
-
-## License
-
-This add-on is licensed under the MIT License. 
+For additional help, refer to the [smartbed-mqtt documentation](https://github.com/richardhopton/smartbed-mqtt) or create an issue in the repository. 

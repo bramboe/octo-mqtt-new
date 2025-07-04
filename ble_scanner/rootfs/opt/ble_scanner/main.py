@@ -1285,8 +1285,8 @@ def add_device(mac_address):
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No data provided'}), 400
-                
-        device = {
+    
+    device = {
         'mac_address': mac_address.upper(),
         'name': data.get('name', 'Unknown Device'),
         'rssi': data.get('rssi', 0),

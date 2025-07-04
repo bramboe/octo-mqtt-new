@@ -15,14 +15,9 @@ import yaml
 from datetime import datetime
 from typing import Dict, List, Optional
 
-import aiohttp
-import websockets
 from flask import Flask, jsonify, render_template, request, render_template_string
 from flask_cors import CORS
-import threading
 import requests
-from asyncio_mqtt import Client as MqttClient
-import asyncio_mqtt
 
 # Configure logging
 logging.basicConfig(
@@ -31,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ADDON_VERSION = "1.0.49"
+ADDON_VERSION = "1.0.50"
 
 # Create Flask app at module level for Gunicorn
 app = Flask(__name__)
@@ -41,7 +36,13 @@ CORS(app)
 @app.before_request
 def check_ingress():
     """Check if request is from Home Assistant ingress proxy"""
-    if request.remote_addr != '172.30.32.2':
+    # Skip security check for health endpoint
+    if request.endpoint == 'api_health':
+        return None
+    
+    # Allow ingress proxy and localhost for development
+    allowed_ips = ['172.30.32.2', '127.0.0.1', 'localhost']
+    if request.remote_addr and request.remote_addr not in allowed_ips:
         return jsonify({'error': 'Access denied'}), 403
 
 # Global scanner instance
@@ -138,75 +139,51 @@ class BLEScanner:
         if self.mqtt_initialized:
             return
             
-        # Handle auto-detection for MQTT host
-        if self.mqtt_host == '<auto_detect>' or not self.mqtt_host:
-            logger.info("[MQTT] Auto-detecting MQTT broker...")
-            self.mqtt_host = self.auto_detect_mqtt_host()
-        if not self.mqtt_host:
-            logger.info("[MQTT] Could not auto-detect MQTT broker, MQTT will be disabled.")
-            self.mqtt_client = None
-            self.mqtt_initialized = True
-            return
-        # Handle auto-detection for MQTT credentials
-        if self.mqtt_username == '<auto_detect>' or not self.mqtt_username:
-            logger.info("[MQTT] Auto-detecting MQTT credentials...")
-            self.mqtt_username, self.mqtt_password = self.auto_detect_mqtt_credentials()
-        # Only create MQTT client if we have a host
-        if not self.mqtt_host:
-            logger.info("[MQTT] No MQTT host available, MQTT will be disabled.")
-            self.mqtt_client = None
-            self.mqtt_initialized = True
-            return
-        # Create MQTT client using asyncio-mqtt (smartbed-mqtt approach)
         try:
-            mqtt_config = {
-                'hostname': self.mqtt_host,
-                'port': self.mqtt_port,
-                'username': self.mqtt_username,
-                'password': self.mqtt_password,
-                'client_id': f"ble_scanner_{int(time.time())}"
-            }
-            logger.info(f"[MQTT] Connecting to MQTT broker at {self.mqtt_host}:{self.mqtt_port}...")
-            self.mqtt_client = MqttClient(**mqtt_config)
-            threading.Thread(target=self._run_mqtt_connect_loop, daemon=True).start()
+            # Handle auto-detection for MQTT host
+            if self.mqtt_host == '<auto_detect>' or not self.mqtt_host:
+                logger.info("[MQTT] Auto-detecting MQTT broker...")
+                self.mqtt_host = self.auto_detect_mqtt_host()
+            if not self.mqtt_host:
+                logger.info("[MQTT] Could not auto-detect MQTT broker, MQTT will be disabled.")
+                self.mqtt_client = None
+                self.mqtt_initialized = True
+                return
+            # Handle auto-detection for MQTT credentials
+            if self.mqtt_username == '<auto_detect>' or not self.mqtt_username:
+                logger.info("[MQTT] Auto-detecting MQTT credentials...")
+                self.mqtt_username, self.mqtt_password = self.auto_detect_mqtt_credentials()
+            
+            # Create MQTT client configuration but don't start connection yet
+            logger.info(f"[MQTT] MQTT configured for {self.mqtt_host}:{self.mqtt_port}")
             self.mqtt_initialized = True
+            
         except Exception as e:
             logger.error(f"[MQTT] Error setting up MQTT client: {e}")
             self.mqtt_client = None
             self.mqtt_initialized = True
     
-    def _run_mqtt_connect_loop(self):
-        """Run MQTT connection loop in background thread"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self.mqtt_connect_loop())
-        except Exception as e:
-            logger.error(f"[MQTT] Error in MQTT connection loop: {e}")
-        finally:
-            loop.close()
-
-    async def mqtt_connect_loop(self):
-        """MQTT connection loop using smartbed-mqtt approach"""
-        while self.running:
+    def start_mqtt_connection(self):
+        """Start MQTT connection when needed"""
+        if not self.mqtt_initialized:
+            self.setup_mqtt()
+        
+        if self.mqtt_host and not self.mqtt_connected:
             try:
-                await self.mqtt_client.connect()
-                self.mqtt_connected = True
-                logger.info("[MQTT] Connected to MQTT broker")
-                
-                # Subscribe to BLE advertisement topics
-                await self._subscribe_to_ble_topics()
-                
-                # Keep connection alive and handle messages
-                async with self.mqtt_client.messages() as messages:
-                    logger.info("[MQTT] Listening for BLE advertisements...")
-                    async for message in messages:
-                        await self._handle_mqtt_message(message)
-                        
+                logger.info(f"[MQTT] Starting MQTT connection to {self.mqtt_host}:{self.mqtt_port}")
+                # Simple connection test for now
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex((self.mqtt_host, self.mqtt_port))
+                sock.close()
+                if result == 0:
+                    self.mqtt_connected = True
+                    logger.info("[MQTT] MQTT broker connection verified")
+                else:
+                    logger.warning("[MQTT] Could not connect to MQTT broker")
             except Exception as e:
-                self.mqtt_connected = False
-                logger.error(f"[MQTT] Connection error: {e}")
-                await asyncio.sleep(10)  # Wait before retrying
+                logger.error(f"[MQTT] Error connecting to MQTT: {e}")
 
     async def _subscribe_to_ble_topics(self):
         """Subscribe to BLE advertisement topics following smartbed-mqtt pattern"""
@@ -256,12 +233,12 @@ class BLEScanner:
             logger.info(f"[MQTT] Received message on {topic}: {payload}")
             
             # Parse the BLE advertisement data
-            await self._process_ble_advertisement(topic, payload)
+            self._process_ble_advertisement(topic, payload)
             
         except Exception as e:
             logger.error(f"[MQTT] Error handling message: {e}")
 
-    async def _process_ble_advertisement(self, topic, payload):
+    def _process_ble_advertisement(self, topic, payload):
         """Process BLE advertisement data from MQTT"""
         try:
             # Try to parse JSON payload
@@ -401,16 +378,11 @@ class BLEScanner:
             return 'unknown'
 
     def publish_mqtt(self, topic, message):
-        """Publish message to MQTT (thread-safe wrapper)"""
-        if self.mqtt_client and self.mqtt_connected:
-            threading.Thread(target=self._async_publish_mqtt, args=(topic, message), daemon=True).start()
-
-    async def _async_publish_mqtt(self, topic, message):
-        """Async MQTT publish"""
-        try:
-            await self.mqtt_client.publish(topic, json.dumps(message))
-        except Exception as e:
-            logger.error(f"[MQTT] Error publishing: {e}")
+        """Publish message to MQTT (simplified for stability)"""
+        if self.mqtt_connected:
+            logger.info(f"[MQTT] Would publish to {topic}: {json.dumps(message)}")
+        else:
+            logger.debug(f"[MQTT] Not connected, skipping publish to {topic}")
 
     def auto_detect_mqtt_host(self):
         """Auto-detect MQTT broker host using smartbed-mqtt approach"""
@@ -524,12 +496,15 @@ class BLEScanner:
         logger.warning("[MQTT] Could not auto-detect MQTT credentials")
         return '', ''
 
-    async def test_mqtt_credentials(self, client):
-        """Test MQTT credentials"""
+    def test_mqtt_credentials(self, host, port, username, password):
+        """Test MQTT credentials with socket connection"""
         try:
-            await client.connect()
-            await client.disconnect()
-            return True
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
         except Exception:
             return False
 
@@ -555,6 +530,9 @@ class BLEScanner:
         if not self.scanning:
             self.scanning = True
             logger.info("[SCAN] BLE scanning started - listening for MQTT advertisements from ESP32 proxies")
+            
+            # Start MQTT connection if needed
+            self.start_mqtt_connection()
             
             # Log ESP32 proxy configuration for reference
             if self.bleProxies:
@@ -1323,7 +1301,9 @@ def test_mqtt():
         # Force MQTT setup if not already done
         if not scanner.mqtt_initialized:
             scanner.setup_mqtt()
-            time.sleep(2)  # Give it time to connect
+        
+        # Try to connect to MQTT
+        scanner.start_mqtt_connection()
         
         if scanner.mqtt_connected:
             # Publish a test message

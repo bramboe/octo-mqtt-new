@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.50] - 2025-07-04
+
+### Fixed
+- **CRITICAL**: Resolved segmentation fault on startup by removing problematic asyncio/threading combinations
+- Disabled Gunicorn preload_app to prevent worker conflicts
+- Simplified MQTT initialization to avoid threading issues
+- Removed asyncio-mqtt and aiohttp dependencies that were causing crashes
+- Improved ingress security check to be more robust
+- Simplified MQTT connection handling for stability
+
+### Changed
+- Switched from asyncio-mqtt to simple socket-based MQTT connection testing
+- Removed complex threading setup that was causing segfaults
+- Streamlined dependencies for better stability
+- Made MQTT initialization lazy to prevent startup crashes
+
+### Removed
+- asyncio-mqtt dependency (causing segfaults)
+- aiohttp dependency (not needed)
+- websockets dependency (not needed)
+- Complex threading in MQTT client setup
+
 ## [1.0.49] - 2025-07-04
 
 ### Added

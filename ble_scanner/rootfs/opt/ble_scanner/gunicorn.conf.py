@@ -16,7 +16,7 @@ timeout = 30
 keepalive = 2
 
 # Restart workers after this many requests, to help prevent memory leaks
-preload_app = True
+preload_app = False
 
 # Logging
 accesslog = "-"  # Log to stdout
